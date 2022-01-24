@@ -1,6 +1,7 @@
 #Setup zsh
 
-export ENVDIR=$HOME/env-rhizo
+export ENV_DIR=$HOME/env-rhizo
+export ENV_COMPETION=$ENV_DIR/completions
 
 export ZSH=$HOME/.oh-my-zsh
 ZSH_PLUGIN_DIR=$HOME/.oh-my-zsh/plugins
@@ -18,13 +19,14 @@ plugins=(
 source $ZSH/oh-my-zsh.sh
 
 # Init completions
-zstyle ':completion:*:*:git:*' script $ENVDIR/completions/git-completion.bash
-zstyle ':completion:*:*:hasura:*' script $ENVDIR/completions/hasura-completion.bash
-# This caused a wierd error and the completion was slow...
-# fpath=($ENVDIR/completions $fpath)
+zstyle ':completion:*:*:git:*' script $ENV_COMPETION/git-completion.bash
+zstyle ':completion:*:*:hasura:*' script $ENV_COMPETION/hasura-completion.bash
+. $ENV_COMPETION/npm-completion.bash
 
 # Load completions
 autoload -Uz compinit && compinit
+# may need to run this to reset completions:
+# rm ~/.zcompdum
 
 # Delete % at the beginning
 # unsetopt PROMPT_SP

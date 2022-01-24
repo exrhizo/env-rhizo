@@ -6,8 +6,7 @@ export ENVDIR=$HOME/env-rhizo
 export EDITOR='subl -w'
 export VISUAL=$EDITOR
 
-. ./secrets.sh
-
+FILE=$ENVDIR/secrets.sh && test -f $FILE && source $FILE
 
 # FileSearch
 function f() { find . -iname "*$1*" ${@:2} }
@@ -18,6 +17,7 @@ function hgrep() {history 0 | grep "$1"}
 
 alias rip="rip --graveyard ~/.local/share/Trash"
 alias dc="docker-compose"
+alias scripts="jq '.scripts' package.json"
 
 # Use sublimetext for editing config files
 alias zshconfig="subl $ENVDIR/zshrc.sh"

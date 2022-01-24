@@ -37,6 +37,7 @@ brew install gnutls
 brew install gnu-tar
 brew install gawk
 brew install jq
+brew install tree
 
 # brew install zsh
 
