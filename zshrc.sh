@@ -34,3 +34,6 @@ autoload -Uz compinit && compinit
 # Highlight commands
 source $ZSH_PLUGIN_DIR/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
 
+
+# Load nx completions
+source $ENV_DIR/nx-completion/nx-completion.plugin.zsh
