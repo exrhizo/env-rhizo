@@ -20,9 +20,13 @@ brew install git
 brew install git-lfs
 brew install github/gh/gh
 
-brew install python
+# brew install python
+brew install pyenv
+pyenv install 2.7.18
+pyenv install 3.9.13
+pyenv global 3.9.13 2.7.18
 
-brew install nvm 
+brew install nvm
 
 brew install rm-improved
 brew install vim

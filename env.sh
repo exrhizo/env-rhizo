@@ -69,3 +69,8 @@ export NVM_DIR="${nvm_path}"
 
 [ -s "${brew_opt_path}/nvm/nvm.sh" ] && . "${brew_opt_path}/nvm/nvm.sh"  # This loads nvm
 [ -s "${brew_opt_path}/nvm/etc/bash_completion.d/nvm" ] && . "${brew_opt_path}/nvm/etc/bash_completion.d/nvm"  # This loads nvm bash_completion
+
+
+# Using pyenv, but not the entire time, so this may be a conflicting setup, as python3 installed with brew
+export PATH=$(pyenv root)/shims:$PATH
+
