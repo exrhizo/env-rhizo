@@ -71,6 +71,14 @@ export NVM_DIR="${nvm_path}"
 [ -s "${brew_opt_path}/nvm/etc/bash_completion.d/nvm" ] && . "${brew_opt_path}/nvm/etc/bash_completion.d/nvm"  # This loads nvm bash_completion
 
 
-# Using pyenv, but not the entire time, so this may be a conflicting setup, as python3 installed with brew
-export PATH=$(pyenv root)/shims:$PATH
+#pyenv and virtualenv
+# export PATH=$(pyenv root)/shims:$PATH
+eval "$(pyenv init --path)"
+eval "$(pyenv init -)"
+eval "$(pyenv virtualenv-init -)"
 
+# The next line updates PATH for the Google Cloud SDK.
+if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc'; fi
+
+# The next line enables shell command completion for gcloud.
+if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc'; fi

@@ -25,6 +25,7 @@ brew install pyenv
 pyenv install 2.7.18
 pyenv install 3.9.13
 pyenv global 3.9.13 2.7.18
+brew install pyenv-virtualenv
 
 brew install nvm
 
@@ -42,6 +43,15 @@ brew install gnu-tar
 brew install gawk
 brew install jq
 brew install tree
+brew install htop
+
+# For Java stuff?
+# brew install maven
+# openJDK8 isn't avail for m1 at this moment
+
+# For clojure
+brew install clojure/tools/clojure
+brew install leiningen
 
 # brew install zsh
 
