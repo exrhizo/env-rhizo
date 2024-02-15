@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+echo "Desktop"
+rsync -av --progress ~/Desktop /Volumes/exrhizoATgmail
+
+echo -e "\n\n\n\n\n\n\n\n\n\nProjects"
+rsync -av --progress \
+  --exclude='node_modules/***' \
+  --exclude='.yarn/***' \
+  --exclude='.next/***' \
+  --exclude='.DS_Store' \
+  --exclude='graphistry/***' \
+  ~/Projects /Volumes/exrhizoATgmail
+
+echo -e "\n\n\n\n\n\n\n\n\n\nPictures"
+rsync -av --progress ~/Pictures /Volumes/exrhizoATgmail
+echo -e "\n\n\n\n\n\n\n\n\n\nZoom"
+rysnc -av --progress ~/Documents/Zoom /Volumes/exrhizoATgmail
+
+
+
+echo -e "\n\n\n\n\n\n\n\n\n\nSecondary Drive"
+rsync -av --delete /Volumes/exrhizoATgmail/ /Volumes/exrhizoATgmail2/
