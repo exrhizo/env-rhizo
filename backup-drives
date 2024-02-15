@@ -21,4 +21,10 @@ rysnc -av --progress ~/Documents/Zoom /Volumes/exrhizoATgmail
 
 
 echo -e "\n\n\n\n\n\n\n\n\n\nSecondary Drive"
-rsync -av --delete /Volumes/exrhizoATgmail/ /Volumes/exrhizoATgmail2/
+rsync -av --delete \
+  --exclude='.Spotlight-V100/' \
+  --exclude='.DocumentRevisions-V100/' \
+  --exclude='.TemporaryItems/' \
+  --exclude='.Trashes/' \
+  --exclude='.fseventsd/' \
+  /Volumes/exrhizoATgmail/ /Volumes/exrhizoATgmail2/
