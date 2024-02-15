@@ -25,7 +25,20 @@ alias envconfig="subl $ENVDIR/env.sh"
 
 # Use Gnu utils instead of mac's old crapy versions
 # https://apple.stackexchange.com/questions/69223/how-to-replace-mac-os-x-utilities-with-gnu-core-utilities
-PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"
+export PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"
+export PATH="$HOME/env-rhizo:$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
+
+
+# Graphistry related
+alias mymy="fswatch -o --exclude '.*cache.*' graphistrygpt | while read -r; do MYPY_OUTPUT=\$(mypy --config-file graphistrygpt/mypy.ini graphistrygpt 2>&1); RUFF_OUTPUT=\$(ruff check ./graphistrygpt 2>&1); reset; echo \"\$MYPY_OUTPUT\"; echo \"\$RUFF_OUTPUT\"; done"
+
+function catpy() {
+  for file in "$@"; do
+    echo "# $file"
+    cat "$file"
+  done
+}
+
 
 # Virtual Environment
 # export WORKON_HOME=$HOME/.virtualenvs
@@ -73,12 +86,29 @@ export NVM_DIR="${nvm_path}"
 
 #pyenv and virtualenv
 # export PATH=$(pyenv root)/shims:$PATH
-eval "$(pyenv init --path)"
-eval "$(pyenv init -)"
-eval "$(pyenv virtualenv-init -)"
+# eval "$(pyenv init --path)"
+# eval "$(pyenv init -)"
+# eval "$(pyenv virtualenv-init -)"
 
 # The next line updates PATH for the Google Cloud SDK.
 if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc'; fi
 
 # The next line enables shell command completion for gcloud.
 if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc'; fi
+
+
+
+# >>> conda initialize >>>
+# !! Contents within this block are managed by 'conda init' !!
+__conda_setup="$('/Users/exrhizo/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
+if [ $? -eq 0 ]; then
+    eval "$__conda_setup"
+else
+    if [ -f "/Users/exrhizo/miniconda3/etc/profile.d/conda.sh" ]; then
+        . "/Users/exrhizo/miniconda3/etc/profile.d/conda.sh"
+    else
+        export PATH="/Users/exrhizo/miniconda3/bin:$PATH"
+    fi
+fi
+unset __conda_setup
+# <<< conda initialize <<<
