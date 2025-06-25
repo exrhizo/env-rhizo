@@ -13,11 +13,7 @@ function f() { find . -iname "*$1*" ${@:2} }
 function r() { grep "$1" ${@:2} -R . }
 
 # Easy find commands
-function hgrep() {history 0 | grep "$1"}
-
-alias rip="rip --graveyard ~/.local/share/Trash"
-alias dc="docker-compose"
-alias scripts="jq '.scripts' package.json"
+function hgrep() { history | grep "$1"; }
 
 # Use sublimetext for editing config files
 alias zshconfig="subl $ENVDIR/zshrc.sh"
@@ -30,21 +26,15 @@ export PATH="$HOME/env-rhizo:$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modu
 
 
 # Graphistry related
+alias ssh-dev="ssh -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem ubuntu@louie-dev.grph.xyz"
+alias ssh-prod="ssh -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem ubuntu@den.louie.ai"
+alias ssh-precog="ssh -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem ubuntu@louie-precog.grph.xyz"
+alias scp-dev="scp -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem"
+alias scp-prod="scp -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem"
+
 alias mymy="fswatch -o --exclude '.*cache.*' graphistrygpt | while read -r; do MYPY_OUTPUT=\$(mypy --config-file graphistrygpt/mypy.ini graphistrygpt 2>&1); RUFF_OUTPUT=\$(ruff check ./graphistrygpt 2>&1); reset; echo \"\$MYPY_OUTPUT\"; echo \"\$RUFF_OUTPUT\"; done"
-
-function catpy() {
-  for file in "$@"; do
-    echo "# $file"
-    cat "$file"
-  done
-}
-
-
-# Virtual Environment
-# export WORKON_HOME=$HOME/.virtualenvs
-# export PROJECT_HOME=$HOME/projects
-# source /usr/local/bin/virtualenvwrapper.sh
-
+alias lupg='(set -a; source system.env; set +a; echo "postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}"; PGPASSWORD=$POSTGRES_PASSWORD psql "postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}")'
+export PYTEST_DC=./dcc
 
 # What? mac is always indexing nodemodules? dumb
 # open your profile with `vim ~/.bash_profile`
@@ -60,6 +50,13 @@ function npmi {
     fi
 }
 
+loadenv () {
+  [ -f "$1" ] || { echo "usage: loadenv <file>"; return 1; }
+  set -a
+  source "$1"
+  set +a
+}
+
 # Skip husky?
 # export HUSKY_SKIP_HOOKS=1
 
@@ -68,47 +65,31 @@ function npmi {
 export IS_ROSETTA_X86="$(sysctl -n sysctl.proc_translated)"
 
 if [ $IS_ROSETTA_X86 = "1" ]; then
-    local brew_path="/usr/local/homebrew/bin"
-    local brew_opt_path="/usr/local/opt"
-    local nvm_path="$HOME/.nvm-x86"
+    brew_path="/usr/local/homebrew/bin"
+    brew_opt_path="/usr/local/opt"
+    nvm_path="$HOME/.nvm-x86"
 else
-    local brew_path="/opt/homebrew/bin"
-    local brew_opt_path="/opt/homebrew/opt"
-    local nvm_path="$HOME/.nvm"
+    brew_path="/opt/homebrew/bin"
+    brew_opt_path="/opt/homebrew/opt"
+    nvm_path="$HOME/.nvm"
 fi
 
 export PATH="${brew_path}:${PATH}"
+
+# brew did keg only so it didn't conflict with mysql package
+export PATH="/opt/homebrew/opt/mysql-client/bin:$PATH"
 export NVM_DIR="${nvm_path}"
 
+# Docker compose menu
+export COMPOSE_MENU=false
+
 [ -s "${brew_opt_path}/nvm/nvm.sh" ] && . "${brew_opt_path}/nvm/nvm.sh"  # This loads nvm
-[ -s "${brew_opt_path}/nvm/etc/bash_completion.d/nvm" ] && . "${brew_opt_path}/nvm/etc/bash_completion.d/nvm"  # This loads nvm bash_completion
-
-
-#pyenv and virtualenv
-# export PATH=$(pyenv root)/shims:$PATH
-# eval "$(pyenv init --path)"
-# eval "$(pyenv init -)"
-# eval "$(pyenv virtualenv-init -)"
 
 # The next line updates PATH for the Google Cloud SDK.
-if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/path.zsh.inc'; fi
+if [ -f '/Users/exrhizo/installs/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/exrhizo/installs/google-cloud-sdk/path.zsh.inc'; fi
 
 # The next line enables shell command completion for gcloud.
-if [ -f '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/exrhizo/Downloads/google-cloud-sdk/completion.zsh.inc'; fi
 
 
 
-# >>> conda initialize >>>
-# !! Contents within this block are managed by 'conda init' !!
-__conda_setup="$('/Users/exrhizo/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
-if [ $? -eq 0 ]; then
-    eval "$__conda_setup"
-else
-    if [ -f "/Users/exrhizo/miniconda3/etc/profile.d/conda.sh" ]; then
-        . "/Users/exrhizo/miniconda3/etc/profile.d/conda.sh"
-    else
-        export PATH="/Users/exrhizo/miniconda3/bin:$PATH"
-    fi
-fi
-unset __conda_setup
-# <<< conda initialize <<<
+
