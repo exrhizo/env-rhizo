@@ -53,7 +53,8 @@ brew install htop
 brew install clojure/tools/clojure
 brew install leiningen
 
-# brew install zsh
+# zsh shell improvemtnes
+brew install fzf fd ripgrep
 
 #Apps
 # brew install --cask dropbox

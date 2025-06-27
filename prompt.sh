@@ -25,10 +25,8 @@ git_prompt_info() {            # [branch] or [branch*] if dirty
 ################################################################
 # 3.  Prompt definition
 ################################################################
-# • Line-1:  cyan arch, bold-blue path, git info
-# • Line-2:  cyan arrow where typing starts
+# • cyan arch, bold-blue path, git info, arrow
 # • RPROMPT: red “✘ <status>” if last cmd failed
-PROMPT="%F{cyan}\$(arch_indicator)%f %B%F{blue}%~%f%b \$(git_prompt_info)
-%F{cyan}➜%f "
-RPROMPT='%(?..%F{red}✘ %?%f)'
+PROMPT="%F{cyan}\$(arch_indicator)%f %B%F{blue}%~%f%b \$(git_prompt_info)%F{cyan}➜%f "
+# RPROMPT='%(?..%F{red}✘ %?%f)'
 

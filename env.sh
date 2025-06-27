@@ -13,7 +13,7 @@ function f() { find . -iname "*$1*" ${@:2} }
 function r() { grep "$1" ${@:2} -R . }
 
 # Easy find commands
-function hgrep() { history | grep "$1"; }
+function hgrep() { cat ~/.zsh_history | grep "$1"; }
 
 # Use sublimetext for editing config files
 alias zshconfig="subl $ENVDIR/zshrc.sh"
