@@ -1,0 +1,15 @@
+[project]
+name = "env-rhizo"
+version = "0.1.0"
+description = "Base environment"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "graphistry>=0.39.0",
+    "igraph>=0.11.9",
+    "jedi>=0.19.2",
+    "networkx>=3.5",
+    "scipy>=1.16.0",
+    "sentence-transformers>=5.0.0",
+    "tiktoken>=0.9.0",
+]

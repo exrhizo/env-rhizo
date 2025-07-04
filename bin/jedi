@@ -1,0 +1,174 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+#!/usr/bin/env python3
+"""
+Emit a stub‑style Markdown view of a Python repo for LLM digestion.
+"""
+
+import argparse, ast, collections, pathlib, re, textwrap
+import jedi
+
+INDENT = '\t'					# use tabs, not spaces
+
+# ───────────────────── CLI ────────────────────── #
+PARSER = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+PARSER.add_argument("src_dir", nargs="?", default="./commune", help="Root dir to analyse")
+PARSER.add_argument("--full", nargs="*", default=[], help="Paths (rel to src_dir) to dump verbatim")
+PARSER.add_argument("--target", nargs="*", default=[],
+					help="Only emit target files + any file that references a symbol defined there")
+PARSER.add_argument("--len", dest="len_thr", type=int, default=50,
+					help="Min # lines ⇒ snippet candidate")
+PARSER.add_argument("--refs", dest="ref_thr", type=int, default=10,
+					help="Min cross‑file refs ⇒ hot symbol")
+ARGS = PARSER.parse_args()
+
+ROOT   = pathlib.Path(ARGS.src_dir).resolve()
+FULL   = {(ROOT / p).resolve() for p in ARGS.full}
+TARGET = {(ROOT / p).resolve() for p in ARGS.target}
+PKG    = ROOT.name						# e.g. graphistrygpt
+
+SKIP   = re.compile(r"(^\.|/__pycache__/|/tests?/|/build/)")
+
+# ───────────── helpers & heuristics ───────────── #
+def first_import_block(src: list[str]) -> list[str]:
+	"""Return the contiguous import block at the top of a file."""
+	out = []
+	for line in src:
+		if line.startswith(("import ", "from ")):
+			out.append(line.rstrip())
+		elif out and not line.strip():		# blank after imports
+			break
+		elif out:							# reached real code
+			break
+	return out
+
+def keep_import(line: str) -> bool:
+	"""True if line imports our own package (one‑level deep)."""
+	mod = (line.split()[1] if line.startswith("import ")
+		   else line.split()[1])			# after 'from'
+	return mod.startswith(f"{PKG}.")
+
+def node_span(n: ast.AST) -> tuple[int, int]:
+	return n.lineno, getattr(n, "end_lineno", n.lineno)
+
+def cat_hdr(src: list[str], lineno: int) -> str:
+	"""Return full header (handles multi‑line defs)."""
+	h, i = src[lineno - 1].rstrip(), lineno
+	while not h.rstrip().endswith(":") and i < len(src):
+		i += 1
+		h += " " + src[i - 1].strip()
+	return h
+
+def snippet(src: list[str], node: ast.AST, max_lines: int = 20) -> str:
+	s, e = node_span(node)
+	return "\n".join(textwrap.dedent(l) for l in src[s-1 : min(e, s-1+max_lines)])
+
+def ref_counts(root: pathlib.Path) -> collections.Counter[str]:
+	cnt = collections.Counter()
+	for f in root.rglob("*.py"):
+		if SKIP.search(str(f.relative_to(root))):
+			continue
+		t = ast.parse(f.read_text(encoding="utf-8", errors="ignore"))
+		for n in ast.walk(t):
+			if isinstance(n, ast.Name):
+				cnt[n.id] += 1
+	return cnt
+REFS = ref_counts(ROOT) if ARGS.ref_thr else collections.Counter()
+
+def hot(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+	s, e = node_span(fn)
+	return (e - s) >= ARGS.len_thr or REFS.get(fn.name, 0) >= ARGS.ref_thr
+
+# ─────── compute fan‑out set if --target given ─────── #
+TARGET_NAMES: set[str] = set()
+if TARGET:
+	for p in TARGET:
+		t = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+		for n in t.body:
+			if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+				TARGET_NAMES.add(n.name)
+			elif isinstance(n, ast.Assign):
+				for tgt in n.targets:
+					if isinstance(tgt, ast.Name):
+						TARGET_NAMES.add(tgt.id)
+
+def touches_target(path: pathlib.Path) -> bool:
+	return (not TARGET
+			or path in TARGET
+			or any(name in path.read_text(encoding="utf-8", errors="ignore")
+				   for name in TARGET_NAMES))
+
+# ─────────────────── main loop ─────────────────── #
+for py in sorted(ROOT.rglob("*.py")):
+	rel = py.relative_to(ROOT)
+	if SKIP.search(str(rel)) or not touches_target(py):
+		continue
+
+	print(f"### {rel}")
+	print("```python")
+
+	if py in FULL:
+		print(py.read_text(encoding="utf-8", errors="ignore"))
+		print("```"); print(); continue
+
+	code = py.read_text(encoding="utf-8", errors="ignore")
+	src  = code.splitlines()
+	tree = ast.parse(code)
+
+	# imports
+	block = [l for l in first_import_block(src) if keep_import(l)]
+	for imp in dict.fromkeys(block):		# dedupe, keep order
+		print(imp)
+	if block: print()
+
+	# defs & classes
+	script = jedi.Script(code=code, path=str(py))
+	for d in script.get_names(definitions=True, references=False):
+		if d.type not in {"function", "class"}: continue
+		hdr      = cat_hdr(src, d.line)
+		node     = next((n for n in tree.body
+						 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+						 and n.name == d.name), None)
+		indent1  = "" if node and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else ""
+		print(f"{indent1}{hdr}")			# top‑level header
+
+		# docstring + optional snippet
+		lines: list[str] = []
+		if node:
+			ds = ast.get_docstring(node)
+			if ds:
+				lines += textwrap.dedent(ds).rstrip().splitlines()
+			if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and hot(node):
+				if lines: lines.append("")
+				lines += snippet(src, node).replace('"""', r'\"\"\"').splitlines()
+
+		if lines:
+			print(f"{indent1}{INDENT}\"\"\"")
+			for l in lines:
+				print(f"{indent1}{INDENT}{l}")
+			print(f"{indent1}{INDENT}\"\"\"")
+		print(f"{indent1}{INDENT}...")
+		print()								# blank line
+
+		# class methods
+		if isinstance(node, ast.ClassDef):
+			for m in node.body:
+				if not isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)): continue
+				m_hdr    = f"{INDENT}{cat_hdr(src, m.lineno)}"
+				print(m_hdr)
+				m_lines  = []
+				ds_m     = ast.get_docstring(m)
+				if ds_m:
+					m_lines += textwrap.dedent(ds_m).rstrip().splitlines()
+				if hot(m):
+					if m_lines: m_lines.append("")
+					m_lines += snippet(src, m).replace('"""', r'\"\"\"').splitlines()
+				if m_lines:
+					print(f"{INDENT}{INDENT}\"\"\"")
+					for l in m_lines:
+						print(f"{INDENT}{INDENT}{l}")
+					print(f"{INDENT}{INDENT}\"\"\"")
+				print(f"{INDENT}{INDENT}...")
+				print()
+
+	print("```")
+	print()

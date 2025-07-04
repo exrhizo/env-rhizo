@@ -1,0 +1,396 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+r"""
+ctxslice v9  - Token-budgeted context extractor
+===============================================
+
+Quick synopsis
+--------------
+• Scores Python files/modules in a repo by PageRank-like relevance.
+• Optionally stitches **import**, **symbol** and **git co-change** edges,
+  exporting a Graphistry graph.
+• Can emit either rich code stubs (default) or an interactive graph.
+
+New in v9.1                                                    (2025-07-03)
+---------------------------------------------------------------------------
+* All edges now carry a UNIX `time` attribute:
+  - `import`, `symbol` : timestamp = script start time ("now")
+  - `git`              : timestamp = most recent shared commit
+* More-robust ignore-pattern handling.
+* Cleaner header:  "ΔPR … │ PRg … │ toks …"
+
+Example workflows
+-----------------
+Extract 15 000 tokens of context around *graphistrygpt/agent/base.py*::
+
+    ctxslice graphistrygpt \
+        --ignore graphistrygpt/telemetry.py graphistrygpt/emitter.py \
+        --target graphistrygpt/agent/base.py \
+        --tokens 15000 > ae.md
+
+Visualise the zero-hop dependency graph in Graphistry::
+
+    ctxslice graphistrygpt \
+        --target graphistrygpt/agent/base.py \
+        --hops 0 --git --symbols --graphistry
+
+Interesting Louie.ai targets
+
+    graphistrygpt/agent/base.py
+    graphistrygpt/models/element/df.py
+    graphistrygpt/app_core/account_manager.py
+    graphistrygpt/tool/tools.py
+"""
+
+import argparse, ast, collections, datetime as dt, fnmatch, itertools, os, pathlib, re, subprocess, sys
+import networkx as nx, tiktoken, jedi
+
+# ─────────────────────────────── CLI
+ap = argparse.ArgumentParser(
+    description="Token-budgeted context extractor that scores files and "
+                "optionally emits an interactive Graphistry graph. "
+                "Edges are timestamped (--git, --symbols, imports).",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    epilog=(
+        "Examples:\n"
+        "  ctxslice graphistrygpt --ignore graphistrygpt/telemetry.py "
+        "graphistrygpt/emitter.py --target graphistrygpt/agent/base.py "
+        "--tokens 15000 > ae.md\n\n"
+        "  ctxslice graphistrygpt --ignore graphistrygpt/telemetry.py "
+        "graphistrygpt/emitter.py --target graphistrygpt/agent/base.py "
+        "--hops 0 --git --symbols --graphistry"
+    )
+)
+
+ap.add_argument("src_dir", nargs="?", default=".")
+ap.add_argument("--target", nargs="+")
+ap.add_argument("--ignore", nargs="*", default=[])
+ap.add_argument("--tokens", type=int, default=0)
+ap.add_argument("--include-tests", action="store_true")
+ap.add_argument("--sentence-transformer", action="store_true")
+ap.add_argument("--model-path", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+ap.add_argument("--graphistry", action="store_true")
+ap.add_argument("--git", action="store_true")
+ap.add_argument("--symbols", action="store_true")
+ap.add_argument("--no-import-graph", action="store_true")
+ap.add_argument("--w-import", type=float, default=1.0)
+ap.add_argument("--w-symbol", type=float, default=1.0)
+ap.add_argument("--w-git", type=float, default=0.01)
+ap.add_argument("--hops", type=int, default=2)
+
+
+
+args = ap.parse_args()
+
+if not args.target and args.hops:
+    print("WARNING: --hops without --target does nothing; ignoring hop filter", file=sys.stderr)
+
+# ─────────────────────────────── constants
+LONG_DEF_LINES = 120
+SNIPPET_CHAR_LIMIT, SNIPPET_MAX_LINES = 1000, 200
+NOW_SEC = int(dt.datetime.now(dt.UTC).timestamp())
+
+ENC = tiktoken.encoding_for_model("gpt-4")
+
+ROOT = pathlib.Path(args.src_dir).resolve()
+CWD  = pathlib.Path.cwd()
+GIT_ROOT = pathlib.Path.cwd()
+
+# ─────────────────────────────── optional deps
+SENTENCE_TRANSFORMERS_ENABLED = False
+if args.sentence_transformer:
+    try:
+        from sentence_transformers import SentenceTransformer, util as st_util
+        SENTENCE_TRANSFORMERS_ENABLED = True
+    except ImportError:
+        print("SentenceTransformer not found - embeddings disabled", file=sys.stderr)
+
+GRAPHISTRY_ENABLED = False
+if args.graphistry:
+    try:
+        import graphistry, pandas as pd
+        GRAPHISTRY_ENABLED = True
+    except ImportError:
+        print("Graphistry not found - graphistry disabled", file=sys.stderr)
+
+# ─────────────────────────────── helpers
+def tok_est(s: str) -> int: return len(ENC.encode(s))
+def rel_to(p: pathlib.Path, base: pathlib.Path) -> str:
+    try:    return str(p.relative_to(base))
+    except ValueError: return str(p)
+# ◆ robust ignore matcher -------------------------------------------------
+def _match_ignore(p: pathlib.Path, pat: str) -> bool:
+    pobj = pathlib.Path(pat)
+    if pobj.is_absolute():
+        return p.resolve() == pobj.resolve()
+    # relative path match to CWD / ROOT
+    rel_cwd = rel_to(p, CWD)
+    rel_root = rel_to(p, ROOT)
+    return any(fnmatch.fnmatch(x, pat) for x in (rel_cwd, rel_root, str(p)))
+def ignored(p: pathlib.Path) -> bool:
+    if any(_match_ignore(p, pat) for pat in args.ignore):
+        return True
+    if not args.include_tests:
+        r = rel_to(p, ROOT)
+        return r.startswith("tests/") or r.endswith("_test.py")
+    return False
+
+# ─────────────────────────────── files & modules
+ALL_PY_ROOT = [p for p in ROOT.rglob("*.py") if not ignored(p)]
+TARGET = [pathlib.Path(t).expanduser().resolve() for t in (args.target or [])]
+EXTRA = [p for p in TARGET if p not in ALL_PY_ROOT]
+ALL_PY = ALL_PY_ROOT + EXTRA
+if not ALL_PY:
+    sys.exit("No Python files matched filters.")
+
+def mod_of(p: pathlib.Path) -> str:
+    try:    return '.'.join(p.relative_to(GIT_ROOT).with_suffix('').parts)
+    except ValueError: return p.stem
+
+FILE2MOD = {p: mod_of(p) for p in ALL_PY}
+MOD2FILE = {m: p for p, m in FILE2MOD.items()}
+ALL_MODS = list(MOD2FILE)
+
+# ─────────────────────────────── edges
+edges_meta: list[dict] = []
+
+def best_match(mod_name: str) -> str | None:
+    parts = mod_name.split(".")
+    for i in range(len(parts), 0, -1):
+        cand = ".".join(parts[:i])
+        if cand in MOD2FILE: return cand
+    return None
+
+# import edges
+if not args.no_import_graph:
+    for src_path in ALL_PY:
+        src_mod = FILE2MOD[src_path]
+        try: tree = ast.parse(src_path.read_text("utf-8","ignore"))
+        except SyntaxError: continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    dst = best_match(a.name)
+                    if dst and dst != src_mod:
+                        edges_meta.append({'src': src_mod,'dst': dst,'etype':'import','weight': args.w_import, 'w_norm': args.w_import, 'ts': NOW_SEC})
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                dst = best_match(node.module)
+                if dst and dst != src_mod:
+                    edges_meta.append({'src': src_mod,'dst': dst,'etype':'import','weight': args.w_import, 'w_norm': args.w_import, 'ts': NOW_SEC})
+
+# symbol edges
+if args.symbols:
+    seen=set()
+    for src_path in ALL_PY:
+        src_mod = FILE2MOD[src_path]
+        try: names=jedi.Script(path=str(src_path)).get_names(all_scopes=True,references=True)
+        except Exception: continue
+        for n in names:
+            try: dests=n.goto()
+            except Exception: continue
+            for d in dests:
+                mp=getattr(d,"module_path",None)
+                if not mp: continue
+                mp=pathlib.Path(mp).resolve()
+                if mp in FILE2MOD and mp!=src_path:
+                    dst_mod=FILE2MOD[mp]
+                    if (src_mod,dst_mod) not in seen:
+                        seen.add((src_mod,dst_mod))
+                        edges_meta.append({'src':src_mod,'dst':dst_mod,'etype':'symbol','weight':args.w_symbol, 'w_norm': args.w_symbol, 'ts': NOW_SEC})
+
+# git edges
+GIT_SCORE={m:0.0 for m in ALL_MODS}
+if args.git and (GIT_ROOT/".git").exists():
+    try:
+        log=subprocess.check_output(["git","-C",str(GIT_ROOT),"log","--pretty=format:%ct","--name-only"],
+                                    text=True,stderr=subprocess.DEVNULL)
+        cnt,cur,tm_map=collections.Counter(),set(),{}
+        cur_ts: int|None=None
+        for ln in log.splitlines():
+            if re.fullmatch(r"\d{10}",ln.strip()):
+                cur_ts=int(ln.strip());continue
+            if ln.strip()=="":
+                for a,b in itertools.product(cur,cur):
+                    if a!=b:
+                        cnt[(a,b)]+=1
+                        tm_map[(a, b)] = max(tm_map.get((a, b), 0), cur_ts or 0)
+                cur.clear();cur_ts=None;continue
+            p=(GIT_ROOT/ln.strip()).resolve()
+            if p in FILE2MOD: cur.add(FILE2MOD[p])
+        mx=max(cnt.values()) if cnt else 0
+        for (a,b),w in cnt.items():
+            w_norm=args.w_git*(w/mx if mx else 0)
+            ts = tm_map.get((a, b))
+            edges_meta+=[{'src':a,'dst':b,'etype':'git','weight':w_norm, 'w_norm': w_norm, 'ts': ts, 'count': w},
+                         {'src':b,'dst':a,'etype':'git','weight':w_norm, 'w_norm': w_norm, 'ts': ts, 'count': w}]
+            if mx: GIT_SCORE[a]+=w/mx
+        HAVE_GIT=True
+    except Exception:
+        HAVE_GIT=False
+else:
+    HAVE_GIT=False
+
+# ─────────────────────────────── PR & scoring
+G=nx.DiGraph(); G.add_nodes_from(ALL_MODS)
+for e in edges_meta: G.add_edge(e['src'],e['dst'],weight=e['weight'])
+
+PR_GLOBAL = nx.pagerank(G, weight='weight') if G.number_of_edges() else {m:1/len(ALL_MODS) for m in ALL_MODS}
+personal = {m:(1 if MOD2FILE[m] in TARGET else 0) for m in ALL_MODS}
+PR_PERSONAL=nx.pagerank(G,personalization=personal,weight='weight') if TARGET and G.number_of_edges() else PR_GLOBAL
+
+
+# ◆◆◆ SCORE formula
+SCALE=1000.0
+EPSILON = 0.05
+
+if not TARGET:
+    SCORE={m:PR_GLOBAL[m]*SCALE for m in ALL_MODS}
+else:
+    SCORE={m:(PR_PERSONAL[m]-PR_GLOBAL[m])*SCALE for m in ALL_MODS}
+
+if TARGET and len(TARGET) < len(SCORE):
+    # Scale down targets for a better visualization
+    target_modules = {m for m in ALL_MODS if MOD2FILE[m] in TARGET}
+    min_score      = min(SCORE.values())
+
+    # max among *non-target* modules only
+    max_non_target = max(v for k, v in SCORE.items() if k not in target_modules)
+    score_range    = max_non_target - min_score or 1.0
+
+    cap            = max_non_target + EPSILON * score_range
+    max_target     = max(SCORE[m] for m in target_modules)
+    factor         = min(1.0, cap / max_target)
+
+    print(f"Scaling targets down by {factor:.4f}", file=sys.stderr)
+    for m in target_modules:
+        SCORE[m] *= factor
+
+
+# hop filter
+if args.hops>0 and TARGET:
+    kept=set()
+    und=G.to_undirected()
+    for tgt in (FILE2MOD[p] for p in TARGET):
+        kept.update(nx.single_source_shortest_path_length(und,tgt,cutoff=args.hops).keys())
+else:
+    kept=set(ALL_MODS)
+
+ordered=[FILE2MOD[p] for p in TARGET if FILE2MOD[p] in kept]+ \
+        sorted([m for m in kept if MOD2FILE[m] not in TARGET],
+               key=lambda m:-SCORE[m])
+
+# ─────────────────────────────── stub helpers
+def clean(s:str)->str: return s.replace("```","``\u200b`")
+def lead_spaces_to_tabs(s:str)->str:
+    m=re.match(r' +',s)
+    if not m: return s
+    n=len(m.group(0))
+    tabs='\t'*(n//4)+' '*(n%4)
+    return tabs+s[n:]
+
+def sig_lines(node,src):
+    i=node.lineno-1;out=[]
+    while i<len(src):
+        out.append(src[i].rstrip()); 
+        if src[i].rstrip().endswith(":"): break
+        i+=1
+    return out
+def defs(tree) -> list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
+    if tree is None: return []
+    return sorted([n for n in ast.walk(tree) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef))],
+                  key=lambda n:n.lineno)
+
+def strip_prefix(mods: list[str]) -> dict[str, str]:
+    parts, i = [m.split('.') for m in mods], 0
+    while all(len(p) > i for p in parts) and len({p[i] for p in parts}) == 1: i += 1
+    return {m: '.'.join(p[i:]) or m for m, p in zip(mods, parts)}
+
+# ─────────────────────────────── emit
+cum_tok=0; nodes_meta=[]
+labels = strip_prefix(ordered)
+for mod in ordered:
+    p=MOD2FILE[mod]; src=p.read_text("utf-8","ignore").splitlines(False)
+    hot = cum_tok < args.tokens or args.tokens==0
+    head=["### "+rel_to(p,ROOT),
+          f"> ΔPR {SCORE[mod]:.1f} │ PRg {PR_GLOBAL[mod]:.2f} │ toks {cum_tok}",
+          "```python"]
+    body = []
+    # ── module-level docstring ──────────────────────────────
+    try:
+        tree  = ast.parse(p.read_text("utf-8", "ignore"))
+        mdoc  = ast.get_docstring(tree, clean=True)
+    except SyntaxError:
+        tree = None
+        mdoc = None
+
+    if mdoc:
+        body.extend(
+            ['"""']
+            + [clean(l.replace("    ", "\t")) for l in mdoc.splitlines()]
+            + ['"""']
+        )
+    for node in defs(tree):
+        sig    = sig_lines(node, src)
+        indent = re.match(r'[ \t]*', sig[0]).group(0).replace('    ', '\t')
+
+        body.extend(lead_spaces_to_tabs(l) for l in sig)
+        sig_end = node.lineno - 1 + len(sig) - 1
+        
+        if hot:
+            nested_ranges = set()
+            for ch in ast.walk(node):
+                if ch is not node and isinstance(
+                    ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    nested_ranges.update(
+                        range(ch.lineno - 1, getattr(ch, "end_lineno", ch.lineno))
+                    )
+
+            cc = lc = 0
+            for i in range(sig_end + 1, getattr(node, "end_lineno", node.lineno)):
+                if i in nested_ranges or src[i].strip() == "":
+                    continue
+                ln = lead_spaces_to_tabs(src[i])
+                lc += 1
+                cc += len(ln)
+                body.append(clean(ln))
+                if lc >= SNIPPET_MAX_LINES or cc >= SNIPPET_CHAR_LIMIT:
+                    break
+
+        else:
+            docstr = ast.get_docstring(node, clean=True)
+            if docstr:
+                doc = docstr.replace('    ', '\t')
+                for l in ['"""'] + doc.splitlines() + ['"""']:
+                    body.append(indent + clean(l))
+
+    block="\n".join(head+body+["```"])
+    if args.tokens and cum_tok+tok_est(block)>args.tokens: break
+    cum_tok+=tok_est(block); print(block)
+    nodes_meta.append({'v':mod,'score':SCORE[mod],'pagerank':PR_GLOBAL[mod],'point_label':labels[mod]})
+
+# ─────────────────────────────── Graphistry
+COOL = ['#2F5650', '#2E5F5B', '#2E6765', '#2E6E70', '#2F747B', '#317A86', '#347F91', '#38849C', '#3D88A7', '#428BB1', '#498EBB', '#5091C4', '#5793CC', '#5F95D3', '#6897DA', '#7199DF', '#7A9BE3', '#849DE7', '#8DA0E9', '#96A2EA', '#9FA5EA', '#A7A8E9', '#AFABE7', '#B6AFE4', '#BDB4E1']
+WARM = ['#805264', '#905569', '#9F586C', '#AC5B6E', '#B85E6F', '#C2616E', '#CB656D', '#D3696B', '#D96D69', '#DE7267', '#E27765', '#E47D63', '#E68261', '#E68860', '#E68E60', '#E49560', '#E29B62', '#E0A164', '#DDA768', '#DAAD6D', '#D6B273', '#D3B77A', '#D0BC82', '#CDC08C', '#CBC496']
+if GRAPHISTRY_ENABLED:
+    palette = ['#000000', '#001E22', '#002F3D', '#023B58', '#0D4372', '#1A4989', '#2B4D9E', '#3E4FB0', '#5351BF', '#6952CA', '#8053D1', '#9655D5', '#AB57D6', '#BF5BD4', '#D05FCF', '#E065C9', '#EC6DC1', '#F675B9', '#FD7FB2', '#FF8AAB', '#FF96A6', '#FFA2A2', '#FFAEA1', '#FEBBA3', '#FAC7A7', '#F6D2AE', '#F3DDB7', '#F2E6C3', '#F1EFD0', '#F3F5DF', '#F8FBEF', '#FFFFFF']
+    try:
+        edges_df=pd.DataFrame(edges_meta, columns=['src', 'dst', 'etype', 'weight', 'ts', 'count'])
+        edges_df['ts'] = pd.to_datetime(edges_df['ts'], unit='s', utc=True)
+        nodes_df=pd.DataFrame(nodes_meta, columns=['v', 'score', 'pagerank', 'point_label'])
+        graphistry.register(api=3,protocol="https",
+                            server=os.getenv("GRAPHISTRY_SERVER"),
+                            username=os.getenv("GRAPHISTRY_USERNAME"),
+                            password=os.getenv("GRAPHISTRY_PASSWORD"))
+        url=(graphistry
+             .bind(source='src',destination='dst',edge_label='etype',edge_weight='weight')
+             .encode_edge_color('etype')
+             .encode_point_color('score', palette=COOL, as_continuous=True)
+             .encode_edge_color('ts', palette=WARM, as_continuous=True)
+             .edges(edges_df)
+             .bind(node='v',point_label='point_label')
+             .nodes(nodes_df)
+             .name(f"ctxslice: {', '.join(rel_to(t,ROOT) for t in TARGET)}")
+             .plot(render=False))
+        print("Graphistry URL:\n", url, file=sys.stderr)
+    except Exception as e:
+        print("# Graphistry failed:",e,file=sys.stderr)

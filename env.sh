@@ -13,16 +13,12 @@ function f() { find . -iname "*$1*" ${@:2} }
 function r() { grep "$1" ${@:2} -R . }
 
 # Easy find commands
-function hgrep() { cat ~/.zsh_history | grep "$1"; }
-
-# Use sublimetext for editing config files
-alias zshconfig="subl $ENVDIR/zshrc.sh"
-alias envconfig="subl $ENVDIR/env.sh"
+function hgrep() { cat -n ~/.zsh_history | grep "$1"; }
 
 # Use Gnu utils instead of mac's old crapy versions
 # https://apple.stackexchange.com/questions/69223/how-to-replace-mac-os-x-utilities-with-gnu-core-utilities
 export PATH="/usr/local/opt/coreutils/libexec/gnubin:$PATH"
-export PATH="$HOME/env-rhizo:$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
+export PATH="$HOME/env-rhizo/bin:$HOME/.yarn/bin:$HOME/.config/yarn/global/node_modules/.bin:$PATH"
 
 
 # Graphistry related
@@ -35,6 +31,10 @@ alias scp-prod="scp -i ~/.ssh/dev-team-shared-louie-dev-us-east-1.pem"
 alias mymy="fswatch -o --exclude '.*cache.*' graphistrygpt | while read -r; do MYPY_OUTPUT=\$(mypy --config-file graphistrygpt/mypy.ini graphistrygpt 2>&1); RUFF_OUTPUT=\$(ruff check ./graphistrygpt 2>&1); reset; echo \"\$MYPY_OUTPUT\"; echo \"\$RUFF_OUTPUT\"; done"
 alias lupg='(set -a; source system.env; set +a; echo "postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}"; PGPASSWORD=$POSTGRES_PASSWORD psql "postgresql://${POSTGRES_USER}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}")'
 export PYTEST_DC=./dcc
+
+alias conda-lu="$ENVDIR/setup/conda_louie.sh"
+alias danger-claude="claude --dangerously-skip-permissions"
+alias usevenv='export PATH="$(git rev-parse --show-toplevel 2>/dev/null || printf %s "$PWD")/.venv/bin:$PATH"; hash -r'
 
 # What? mac is always indexing nodemodules? dumb
 # open your profile with `vim ~/.bash_profile`

@@ -4,3 +4,4 @@ source $ENV_DIR/zsh-ergonomics.sh
 source $ENV_DIR/env.sh
 source $ENV_DIR/prompt.sh
 source $ENV_DIR/conda-ergonomics.sh
+source $ENV_DIR/alias.sh

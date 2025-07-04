@@ -1,0 +1,131 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+#!/usr/bin/env python3
+r"""
+cocommit  ⸺  Per‑commit co‑change graph (drop‑in v2.1)
+======================================================
+
+Changes vs v2
+-------------
+* Node/edge IDs use the *same* prefix‑stripped, dot‑separated module path
+  as the point label (e.g. ``pkg.core.utils`` instead of ``src/pkg/core/utils.py``).
+
+Everything else is unchanged.
+"""
+from __future__ import annotations
+import argparse, itertools, os, pathlib, re, subprocess, sys, datetime as dt
+import networkx as nx, pandas as pd, graphistry
+
+# ──────────────────────────── CLI
+ap = argparse.ArgumentParser(description="Generate a per‑commit co‑change graph "
+                                         "and upload to Graphistry.")
+ap.add_argument("src_dir", nargs="?", default=".")
+ap.add_argument("--ignore", nargs="*", default=[])
+ap.add_argument("--layout", choices=["std", "modular"], default="std",
+                help="Use Graphistry modular‑weighted layout (requires "
+                     "pygraphistry >= PR #580)")
+args = ap.parse_args()
+
+# ──────────────────────────── helpers
+def strip_prefix(paths: list[str]) -> dict[str, str]:
+    """Return {path: path_without_common_prefix}."""
+    parts, i = [p.split("/") for p in paths], 0
+    while all(len(p) > i for p in parts) and len({p[i] for p in parts}) == 1:
+        i += 1
+    return {p: "/".join(seg[i:]) or p for p, seg in zip(paths, parts)}
+
+def git_root(start: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(subprocess.check_output(
+        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+        text=True).strip())
+
+ROOT     = pathlib.Path(args.src_dir).resolve()
+GIT_ROOT = git_root(ROOT)
+
+def ignored(path: pathlib.Path) -> bool:
+    rel = path.relative_to(GIT_ROOT)
+    return any(rel.match(pat) for pat in args.ignore)
+
+# ──────────────────────────── collect files
+ALL_PY: list[pathlib.Path] = [p for p in ROOT.rglob("*.py") if not ignored(p)]
+if not ALL_PY:
+    sys.exit("No Python files matched.")
+
+REL = {p: p.relative_to(GIT_ROOT).as_posix() for p in ALL_PY}
+
+# ──────────────────────────── compute module IDs & labels
+prefix_stripped = strip_prefix(list(REL.values()))
+MOD: dict[str, str] = {                      # file‑path → module‑id
+    rel: re.sub(r"\.py$", "", short).replace("/", ".")
+    for rel, short in prefix_stripped.items()
+}
+
+# ──────────────────────────── git scan
+log = subprocess.check_output(
+    ["git", "-C", str(GIT_ROOT),
+     "log", "--pretty=format:%H|%ct|%s", "--name-only", "--"],
+    text=True)
+
+edges: list[dict[str, object]] = []
+for block in log.split("\n\n"):
+    header, *flist = block.splitlines()
+    if not header:
+        continue
+    sha, ts_s, msg = header.split("|", 2)
+    ts = int(ts_s)
+    files = [MOD[REL[GIT_ROOT / f]] for f in flist if (GIT_ROOT / f) in REL]
+    for a, b in itertools.combinations(sorted(set(files)), 2):
+        edges.append({"src": a, "dst": b,
+                      "sha": sha, "msg": msg[:180],
+                      "ts": ts, "weight": 1})
+
+if not edges:
+    sys.exit("No co‑commit edges found.")
+
+edges_df = pd.DataFrame(edges)
+edges_df["ts"] = pd.to_datetime(edges_df["ts"], unit="s", utc=True)
+
+# ──────────────────────────── build nodes / PageRank
+loc = {MOD[rel]: sum(1 for _ in p.open("rb")) for p, rel in REL.items()}
+g_nx = nx.Graph()
+g_nx.add_nodes_from(loc)
+for e in edges:
+    g_nx.add_edge(e["src"], e["dst"], weight=1)
+
+pagerank = nx.pagerank(g_nx, weight="weight")
+nodes_df = pd.DataFrame(
+    [{"v": m, "loc": loc[m], "pagerank": pagerank[m],
+      "point_label": m} for m in loc])
+
+# ──────────────────────────── palettes
+COOL = ['#2F5650', '#2E5F5B', '#2E6765', '#2E6E70', '#2F747B', '#317A86',
+        '#347F91', '#38849C', '#3D88A7', '#428BB1', '#498EBB', '#5091C4',
+        '#5793CC', '#5F95D3', '#6897DA', '#7199DF', '#7A9BE3', '#849DE7',
+        '#8DA0E9', '#96A2EA', '#9FA5EA', '#A7A8E9', '#AFABE7', '#B6AFE4',
+        '#BDB4E1']
+WARM = ['#805264', '#905569', '#9F586C', '#AC5B6E', '#B85E6F', '#C2616E',
+        '#CB656D', '#D3696B', '#D96D69', '#DE7267', '#E27765', '#E47D63',
+        '#E68261', '#E68860', '#E68E60', '#E49560', '#E29B62', '#E0A164',
+        '#DDA768', '#DAAD6D', '#D6B273', '#D3B77A', '#D0BC82', '#CDC08C',
+        '#CBC496']
+
+# ──────────────────────────── Graphistry upload
+graphistry.register(
+    api=3, protocol="https",
+    server=os.getenv("GRAPHISTRY_SERVER"),
+    username=os.getenv("GRAPHISTRY_USERNAME"),
+    password=os.getenv("GRAPHISTRY_PASSWORD"))
+
+g = (graphistry
+        .bind(source="src", destination="dst", edge_label="sha")
+        .encode_edge_color("ts", palette=WARM, as_continuous=True)
+        .encode_point_color("pagerank", palette=WARM, as_continuous=True)
+        .edges(edges_df)
+        .bind(node="v", point_label="point_label")
+        .nodes(nodes_df)
+        .name(f"cocommit {ROOT.name}"))
+
+if args.layout == "modular":
+    g = g.compute_igraph('community_multilevel', directed=False)
+    g = g.modularity_weighted_layout(community_col="community_multilevel")
+
+print("Graphistry URL:", g.plot(render=False), file=sys.stderr)

@@ -1,0 +1,237 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+"""
+stubber  –  emit Markdown-wrapped stubs of a Python repo.
+
+Importance score (target mode)
+------------------------------
+score = (1-α)·Extremeness  +  α·Proximity
+
+Extremeness = |PageRank-0.5|*2  (0 for middle PR, 1 for very low or very high PR)
+Proximity   = 1/(1+distance)    (distance in undirected import graph)
+
+Default α = 0.6   (tweak with --alpha)
+
+This variant also buckets candidates by their direct
+relationship to the target(s):
+
+tier = 0  → file **imported by** a target
+tier = 1  → file that **imports** a target
+tier = 2  → everything else
+
+Files are ordered by (tier , -score , pathname).
+"""
+
+import argparse, ast, collections, fnmatch, math, pathlib, re, textwrap
+
+IND = '\t'
+DAMP, ITER = 0.85, 20
+
+# ────────── CLI ──────────
+ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+ap.add_argument("src_dir", nargs="?", default="./commune")
+ap.add_argument("--target",  nargs="*", default=[])
+ap.add_argument("--depth",   type=int, default=1,
+                help="Fan-out distance from targets (0=targets only)")
+ap.add_argument("--alpha",   type=float, default=0.6,
+                help="Weight for proximity in score (0-1)")
+ap.add_argument("--ignore",  nargs="*", default=[],
+                help="Glob patterns to skip (relative to src_dir)")
+ap.add_argument("--max-files", type=int, default=25,
+                help="Limit printed files (0 = unlimited)")
+ap.add_argument("--len",  dest="len_thr",  type=int, default=50)
+ap.add_argument("--refs", dest="ref_thr",  type=int, default=10)
+args = ap.parse_args()
+α = max(0.0, min(1.0, args.alpha))
+
+ROOT   = pathlib.Path(args.src_dir).resolve()
+PKG    = ROOT.name
+TARGET = {(ROOT / p).resolve() for p in args.target}
+IGNORE = args.ignore
+SKIP_BUILTIN = re.compile(r"(^\.|/__pycache__/|/build/)")
+
+def ignored(p: pathlib.Path) -> bool:
+	if p in TARGET: return False
+	rel = str(p.relative_to(ROOT))
+	return any(fnmatch.fnmatch(rel, pat) for pat in IGNORE)
+
+# ────────── collect modules ──────────
+def modname(p: pathlib.Path) -> str:
+	rel = p.relative_to(ROOT).with_suffix('')
+	return PKG + '.' + '.'.join(rel.parts)
+
+MODULE2FILE: dict[str, pathlib.Path] = {}
+for py in ROOT.rglob("*.py"):
+	if SKIP_BUILTIN.search(str(py)) or ignored(py): continue
+	MODULE2FILE[modname(py)] = py
+FILES = set(MODULE2FILE.values())
+
+# ────────── analyse files ──────────
+SYMS_DEF, SYMS_REF, IMPORTS = {}, {}, {}
+for py in FILES:
+	tree = ast.parse(py.read_text("utf-8", "ignore"))
+	defs, refs, imps = set(), set(), set()
+	for n in ast.walk(tree):
+		if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+			defs.add(n.name)
+		elif isinstance(n, ast.Assign):
+			for t in n.targets:
+				if isinstance(t, ast.Name): defs.add(t.id)
+		elif isinstance(n, ast.Name): refs.add(n.id)
+		elif isinstance(n, ast.Import):
+			for a in n.names: imps.add(a.name)
+		elif isinstance(n, ast.ImportFrom) and n.module:
+			imps.add(n.module)
+	SYMS_DEF[py], SYMS_REF[py] = defs, refs
+	IMPORTS[py] = {MODULE2FILE[m] for m in imps
+	               if m.startswith(f"{PKG}.") and m in MODULE2FILE}
+
+# ────────── PageRank ──────────
+INBOUND = {f:set() for f in FILES}
+for f, outs in IMPORTS.items():
+	for t in outs: INBOUND[t].add(f)
+
+# ───── directional tiers relative to TARGET ─────
+DIRECT_OUT: set[pathlib.Path] = set()      # files imported BY a target
+DIRECT_IN : set[pathlib.Path] = set()      # files that import a target
+if TARGET:
+	for t in TARGET:
+		DIRECT_OUT |= IMPORTS.get(t, set())
+		DIRECT_IN  |= INBOUND.get(t, set())
+	DIRECT_OUT -= TARGET
+	DIRECT_IN  -= TARGET
+
+def tier(f: pathlib.Path) -> int:
+	"""0 = imported by target, 1 = imports target, 2 = other."""
+	if f in DIRECT_OUT: return 0
+	if f in DIRECT_IN : return 1
+	return 2
+
+N = len(FILES)
+pr = {f: 1.0/N for f in FILES}
+for _ in range(ITER):
+	new = {}
+	for f in FILES:
+		in_sum = sum(pr[src] / (len(IMPORTS[src]) or N) for src in INBOUND[f])
+		new[f] = (1-DAMP)/N + DAMP*in_sum
+	pr = new
+max_pr = max(pr.values()) or 1
+PR_NORM = {f: pr[f]/max_pr for f in FILES}
+EXTREME = {f: abs(PR_NORM[f]-0.5)*2 for f in FILES}        # 0-1, U-shape
+
+# ────────── distance from targets ──────────
+DIST = {f: math.inf for f in FILES}
+if TARGET:
+	from collections import deque
+	q = deque()
+	for t in TARGET:
+		if t in FILES: DIST[t]=0; q.append(t)
+	while q:
+		cur = q.popleft()
+		for nb in IMPORTS[cur] | INBOUND[cur]:
+			if DIST[nb] > DIST[cur]+1:
+				DIST[nb] = DIST[cur]+1
+				q.append(nb)
+PROX = {f: 1/(1+DIST[f]) if DIST[f]<math.inf else 0.0 for f in FILES}
+
+# ────────── file score ──────────
+def score(f: pathlib.Path) -> float:
+	if TARGET:
+		return (1-α)*EXTREME[f] + α*PROX[f]
+	return PR_NORM[f]
+
+# ────────── fan-out limit ──────────
+def fanout(starts:set[pathlib.Path], depth:int)->set[pathlib.Path]:
+	front, seen = set(starts), set(starts)
+	for _ in range(depth):
+		next_ = set()
+		for f in front:
+			next_ |= IMPORTS[f] | INBOUND[f]
+		next_ = {p for p in next_ if not ignored(p)}
+		next_ -= seen
+		if not next_: break
+		seen |= next_; front = next_
+	return seen
+
+if TARGET:
+	CAND = fanout(TARGET, max(args.depth,0))
+	rest = sorted(CAND - TARGET, key=lambda f: (tier(f), -score(f), str(f)))
+	if args.max_files: rest = rest[: args.max_files]
+	ORDER = [*TARGET, *rest]
+else:
+	allf = [f for f in FILES if not ignored(f)]
+	allf.sort(key=lambda f: (-PR_NORM[f], str(f)))
+	if args.max_files: allf = allf[: args.max_files]
+	ORDER = allf
+
+# ────────── helpers for printing ──────────
+def imp_block(src:list[str]) -> list[str]:
+	raw, col = [], True
+	for l in src:
+		if col and l.startswith(("import ","from ")): raw.append(l.rstrip())
+		elif col and l.strip()=="": raw.append(l.rstrip())
+		else: col=False
+	seen,out=set(),[]
+	for ln in raw:
+		if not ln.startswith(("import ","from ")): out.append(ln); continue
+		mod = ln.split()[1] if ln.startswith("import ") else ln.split()[1]
+		if mod.startswith(f"{PKG}.") and ln not in seen:
+			seen.add(ln); out.append(ln)
+	return out
+
+def hdr(src:list[str], ln:int)->str:
+	h,i=src[ln-1].lstrip(),ln
+	while not h.rstrip().endswith(":") and i<len(src):
+		i+=1; h+=" "+src[i-1].strip()
+	return h.lstrip()
+
+def clean(txt:str)->str:
+	return txt.replace('"""',r'\"\"\"').replace("```","``\u200b`")
+
+def snip(src:list[str], node:ast.AST, k:int=20)->list[str]:
+	s,e=node.lineno-1,getattr(node,"end_lineno",node.lineno)-1
+	l=[l for l in src[s:min(e+1,s+k)] if not l.lstrip().startswith(("import ","from "))]
+	return [clean(textwrap.dedent(l)) for l in l]
+
+# snippet “hot” helper
+REFCNT = collections.Counter(); [REFCNT.update(r) for r in SYMS_REF.values()]
+def hot(fn): return (getattr(fn,"end_lineno",fn.lineno)-fn.lineno)>=args.len_thr \
+	              or REFCNT.get(fn.name,0)>=args.ref_thr
+
+# ────────── emit ──────────
+for py in ORDER:
+	rel = py.relative_to(ROOT)
+	print(f"### {rel}")
+	print("```python")
+	src = py.read_text("utf-8","ignore").splitlines()
+	tree= ast.parse("\n".join(src))
+	ib  = imp_block(src)
+	for l in ib: print(l)
+	if ib: print()
+
+	for n in tree.body:
+		if not isinstance(n,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef)): continue
+		print(hdr(src,n.lineno))
+		ch=[]
+		ds=ast.get_docstring(n)
+		if ds: ch += [clean(l) for l in textwrap.dedent(ds).rstrip().splitlines()]
+		if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and hot(n):
+			if ch: ch.append("")
+			ch += snip(src,n)
+		if ch:
+			print(f"{IND}\"\"\""); [print(f"{IND}{l}") for l in ch]; print(f"{IND}\"\"\"")
+		print(f"{IND}..."); print()
+
+		if isinstance(n,ast.ClassDef):
+			for m in n.body:
+				if not isinstance(m,(ast.FunctionDef,ast.AsyncFunctionDef)): continue
+				print(IND+hdr(src,m.lineno))
+				mch=[]
+				ds_m=ast.get_docstring(m)
+				if ds_m: mch += [clean(l) for l in textwrap.dedent(ds_m).rstrip().splitlines()]
+				if hot(m):
+					if mch: mch.append("")
+					mch += snip(src,m)
+				if mch:
+					print(f"{IND}\"\"\""); [print(f"{IND}{l}") for l in mch]; print(f"{IND}\"\"\"")
+				print(f"{IND}..."); print()
+	print("```"); print()

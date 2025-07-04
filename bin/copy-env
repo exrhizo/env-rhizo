@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# copy-env: extract non-secret shell config and copy to clipboard
+
+emit_file() {
+  local file="$1"
+  echo      "# ==="
+  echo      "# ==="
+  printf -- "# === %s\n" "$file"
+  echo      "# ========================================"
+  if [[ -f "$file" ]]; then
+    cat "$file"
+  fi
+  echo    # blank line
+}
+
+# main output
+
+FILES=(
+  "$HOME/.zshrc"
+  "$PWD/.zshrc"
+  "$PWD/zsh-ergonomics.sh"
+  "$PWD/prompt.sh"
+  "$PWD/conda-ergonomics.sh"
+)
+
+{
+  for f in "${FILES[@]}"; do
+    emit_file $f
+  done
+
+} | {
+  if command -v pbcopy &>/dev/null; then
+    pbcopy && echo "Config copied to clipboard"
+  elif command -v xclip &>/dev/null; then
+    xclip -selection clipboard && echo "Config copied to clipboard"
+  else
+    cat
+  fi
+}

@@ -1,12 +1,8 @@
-################################################################
-# 1.  One-time setup
-################################################################
+
 setopt prompt_subst            # let $(cmd) run inside PROMPT
 autoload -Uz colors && colors  # defines $fg[...] / %F{…} colours
 
-################################################################
-# 2.  Tiny helpers
-################################################################
+
 arch_indicator() {             # M1 vs Rosetta
   [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == 1 ]] && echo x86 || echo M1
 }
@@ -22,11 +18,8 @@ git_prompt_info() {            # [branch] or [branch*] if dirty
   fi
 }
 
-################################################################
-# 3.  Prompt definition
-################################################################
+
 # • cyan arch, bold-blue path, git info, arrow
 # • RPROMPT: red “✘ <status>” if last cmd failed
 PROMPT="%F{cyan}\$(arch_indicator)%f %B%F{blue}%~%f%b \$(git_prompt_info)%F{cyan}➜%f "
 # RPROMPT='%(?..%F{red}✘ %?%f)'
-

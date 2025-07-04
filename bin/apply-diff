@@ -1,0 +1,98 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+"""
+apply-diff  ─  Apply a minimal @@… unified-diff snippet from the clipboard
+               directly to a target file.
+
+Usage
+-----
+    apply-diff path/to/file.py
+
+Assumptions
+-----------
+* The clipboard diff has only @@ markers and +/-/␠ lines (no '---' / '+++' header,
+  no line numbers).
+* Hunks are given in file order.
+* The target file is text and ends with a trailing newline (added if missing).
+
+If a hunk’s context cannot be found exactly, the script aborts and returns 1.
+"""
+
+from __future__ import annotations
+import subprocess, sys
+from pathlib import Path
+from typing import List, Tuple
+
+DiffLine = Tuple[str, str]          # (' ', text)  | ('-', text) | ('+', text)
+
+
+# ───────────── clipboard helpers ─────────────
+def clipboard_text() -> str:
+    """Return clipboard text using pbpaste (mac) or xclip (linux)."""
+    for cmd in (["pbpaste"], ["xclip", "-selection", "clipboard", "-o"]):
+        try:
+            out = subprocess.check_output(cmd, text=True)
+            if out:
+                return out
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+    sys.exit("apply-diff: no clipboard reader found (needs pbpaste or xclip)")
+
+
+# ───────────── diff parsing ─────────────
+def parse_snippet(lines: List[str]) -> List[List[DiffLine]]:
+    """Split clipboard lines into hunks (lists of DiffLine)."""
+    hunks: list[list[DiffLine]] = []
+    cur: list[DiffLine] | None = None
+    for raw in lines:
+        if raw.startswith('@@'):
+            if cur:
+                hunks.append(cur)
+            cur = []
+            continue
+        if cur is None:
+            continue                      # ignore preamble before first @@
+        tag, text = raw[0], raw[1:]
+        if tag not in ' +-':
+            raise ValueError(f"unexpected diff line: {raw!r}")
+        cur.append((tag, text))
+    if cur:
+        hunks.append(cur)
+    return hunks
+
+
+# ───────────── hunk application ─────────────
+def apply_hunk(buf: List[str], hunk: List[DiffLine], start: int) -> int:
+    """Replace slice matching old_seq with new_seq starting at index ≥ start."""
+    old_seq = [txt for tag, txt in hunk if tag != '+']
+    new_seq = [txt for tag, txt in hunk if tag != '-']
+    for i in range(start, len(buf) - len(old_seq) + 1):
+        if buf[i : i + len(old_seq)] == old_seq:
+            buf[i : i + len(old_seq)] = new_seq
+            return i + len(new_seq)
+    raise RuntimeError(f"apply-diff: hunk context not found:\n{old_seq}")
+
+
+def patch_file(path: Path, snippet: str) -> None:
+    buf = path.read_text().splitlines(keepends=False)
+    hunks = parse_snippet(snippet.splitlines())
+    cursor = 0
+    for hunk in hunks:
+        cursor = apply_hunk(buf, hunk, cursor)
+    path.write_text('\n'.join(buf) + '\n')  # ensure trailing newline
+
+
+# ───────────── main ─────────────
+def main() -> None:
+    if len(sys.argv) != 2:
+        sys.exit("usage: apply-diff FILE")
+    target = Path(sys.argv[1])
+    if not target.is_file():
+        sys.exit(f"apply-diff: {target} is not a regular file")
+    try:
+        patch_file(target, clipboard_text())
+    except Exception as e:
+        sys.exit(str(e))
+
+
+if __name__ == "__main__":
+    main()

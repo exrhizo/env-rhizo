@@ -7,10 +7,6 @@
 #  and   source zsh-ergonomics.sh   from your main ~/.zshrc
 # ============================================================================
 
-# Guard against double-loading
-[[ -n ${ZSH_ERGONOMICS_LOADED:-} ]] && return
-export ZSH_ERGONOMICS_LOADED=1
-
 # ---------------------------------------------------------------------------
 # 0.  Baseline initialisation
 # ---------------------------------------------------------------------------
@@ -21,16 +17,21 @@ setopt prompt_subst                      # lets $(…) run inside PROMPTs
 # ---------------------------------------------------------------------------
 # 1.  History-substring search on ↑ / ↓
 # ---------------------------------------------------------------------------
+# Prefix-search ↑/↓ even after VS Code’s shell-integration
 autoload -Uz up-line-or-beginning-search
 autoload -Uz down-line-or-beginning-search
+
 zle -N  up-line-or-beginning-search
 zle -N  down-line-or-beginning-search
 
-# Bind in both emacs & vi-insert keymaps
-for km in emacs viins; do
-  bindkey -M $km '^[[A' up-line-or-beginning-search   # ↑
-  bindkey -M $km '^[[B' down-line-or-beginning-search # ↓
-done
+__prefix_rebind() {
+  for km in main emacs viins vicmd; do
+    bindkey -M $km '^[[A' up-line-or-beginning-search   # Up
+    bindkey -M $km '^[[B' down-line-or-beginning-search # Down
+  done
+}
+
+__prefix_rebind
 
 # ---------------------------------------------------------------------------
 # 2.  Fuzzy / forgiving tab-completion
@@ -42,8 +43,9 @@ zstyle ':completion:*' matcher-list \
        'l:|=* r:|=*'
 
 # Menu-style completion after first ambiguous Tab
-setopt menu_complete      # 1st Tab: longest common prefix
-setopt auto_menu          # 2nd Tab: interactive menu
+unsetopt menu_complete    # Don't auto-fill first match
+setopt auto_menu          # Show menu on 2nd Tab
+setopt list_ambiguous     # Complete up to ambiguity point
 setopt glob_complete      # treat incomplete path chunks as globs (en/env*)
 
 # ---------------------------------------------------------------------------
