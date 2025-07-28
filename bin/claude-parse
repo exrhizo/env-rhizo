@@ -1,0 +1,52 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+import sys
+import json
+import html
+from collections import defaultdict
+
+def convert_to_markdown(conversation_data: dict) -> str:
+    output_lines: list[str] = []
+    message_counts = defaultdict(int)
+    
+    for message in conversation_data['messages']:
+        role = message['role']
+        message_counts[role] += 1
+        output_lines.append(f"# {role.capitalize()} Message {message_counts[role]}")
+        output_lines.append("")
+        
+        for content in message['content']:
+            content_type = content['type']
+            
+            if content_type == 'text':
+                # Unescape HTML entities and render as plain text
+                unescaped_text = html.unescape(content['text'])
+                output_lines.append(unescaped_text)
+                output_lines.append("")
+                
+            elif content_type == 'tool_use':
+                # Render tool calls as JSON code blocks
+                output_lines.append(f"## Tool Call: {content['name']} (ID: {content['id']})")
+                output_lines.append("")
+                output_lines.append("```json")
+                output_lines.append(json.dumps(content['input'], indent=2))
+                output_lines.append("```")
+                output_lines.append("")
+                
+            elif content_type == 'tool_result':
+                # Render tool results as JSON code blocks
+                output_lines.append(f"## Tool Result (For ID: {content['tool_use_id']})")
+                output_lines.append("")
+                output_lines.append("```json")
+                output_lines.append(str(content['content']))
+                output_lines.append("```")
+                output_lines.append("")
+                
+    return "\n".join(output_lines)
+
+# Example usage:
+if __name__ == "__main__":
+
+    input_data = json.load(sys.stdin)
+    
+    markdown_output = convert_to_markdown(input_data)
+    print(markdown_output)

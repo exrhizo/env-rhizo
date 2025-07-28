@@ -16,7 +16,7 @@ rsync -av --progress \
 echo -e "\n\n\n\n\n\n\n\n\n\nPictures"
 rsync -av --progress ~/Pictures /Volumes/exrhizoATgmail
 echo -e "\n\n\n\n\n\n\n\n\n\nZoom"
-rysnc -av --progress ~/Documents/Zoom /Volumes/exrhizoATgmail
+rsync -av --progress ~/Documents/Zoom /Volumes/exrhizoATgmail
 
 
 

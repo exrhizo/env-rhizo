@@ -1,0 +1,66 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+"""
+Revert selected files / directories back to how they look on the `develop` branch.
+
+Usage:
+    # restore two folders and one file
+    `revert-paths "graphistrygpt/tool/**" "graphistrygpt/tests/**" bin/python`
+
+    # change the base branch on the fly
+    `BASE_BRANCH=main revert-paths docs scripts`
+"""
+import os
+import pathlib
+import subprocess
+import sys
+from typing import Iterable
+
+BASE_BRANCH = os.getenv("BASE_BRANCH", "develop")   # override with env if you like
+
+
+def sh(*cmd: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run a shell command and capture stdout."""
+    return subprocess.run(
+        cmd, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+
+def changed_vs_base(pathspec: str) -> list[str]:
+    """List files that differ between HEAD and BASE_BRANCH for the given pathspec."""
+    out = sh("git", "diff", "--name-only", f"{BASE_BRANCH}...HEAD", "--", pathspec, check=False)
+    return [p for p in out.stdout.splitlines() if p.strip()]
+
+
+def exists_on_base(relpath: str) -> bool:
+    """True if `relpath` exists on BASE_BRANCH."""
+    return sh("git", "cat-file", "-e", f"{BASE_BRANCH}:{relpath}", check=False).returncode == 0
+
+
+def revert_one(path: str) -> None:
+    """Restore or remove a single file so it matches BASE_BRANCH."""
+    if exists_on_base(path):
+        sh("git", "checkout", BASE_BRANCH, "--", path)        # restore contents
+    else:
+        # File is new on the feature branch → remove it.
+        # `git rm --cached` handles tracked files; unlink() cleans the work‑tree copy if present.
+        sh("git", "rm", "--quiet", "--cached", "-f", path, check=False)
+        pathlib.Path(path).unlink(missing_ok=True)            # ignore if already gone
+
+
+def revert_pathspec(pathspec: str) -> None:
+    for f in changed_vs_base(pathspec):
+        revert_one(f)
+
+
+def main(args: Iterable[str]) -> None:
+    if not args:
+        sys.exit("Pass one or more files/folders/globs to revert (see --help).")
+
+    for spec in args:
+        revert_pathspec(spec)
+
+    print(f"\n✔  Finished.  Review with `git status` / `git diff` and commit when ready.")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

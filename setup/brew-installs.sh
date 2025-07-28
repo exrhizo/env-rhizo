@@ -45,6 +45,24 @@ brew install jq
 brew install tree
 brew install htop
 
+brew install tmux
+brew install mitmproxy
+
+brew install --cask chromium 
+
+
+# Brain Scan tools
+brew install dcm2niix dcmtk
+brew tap mrtrix3/mrtrix3
+brew install mrtrix3
+brew install git-annex
+
+
+# https://web.mit.edu/fsl_v5.0.10/fsl/doc/wiki/FSL.html
+brew install gcc5 cmake tcsh libomp
+
+
+
 # For Java stuff?
 # brew install maven
 # openJDK8 isn't avail for m1 at this moment

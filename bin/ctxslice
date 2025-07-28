@@ -113,7 +113,12 @@ if args.graphistry:
         print("Graphistry not found - graphistry disabled", file=sys.stderr)
 
 # ─────────────────────────────── helpers
-def tok_est(s: str) -> int: return len(ENC.encode(s))
+def tok_est(s: str) -> int:
+    try:
+        return len(ENC.encode(s, allowed_special={'<|endoftext|>'}))
+    except Exception as e:
+        print(f"Error encoding string: {e}", file=sys.stderr)
+        return int(len(s) / 3)
 def rel_to(p: pathlib.Path, base: pathlib.Path) -> str:
     try:    return str(p.relative_to(base))
     except ValueError: return str(p)
@@ -266,16 +271,21 @@ if TARGET and len(TARGET) < len(SCORE):
 
 
 # hop filter
-if args.hops>0 and TARGET:
+if args.hops == 0:
+    kept = {FILE2MOD[p] for p in TARGET if p in FILE2MOD}
+elif TARGET:
     kept=set()
     und=G.to_undirected()
-    for tgt in (FILE2MOD[p] for p in TARGET):
+    for tgt in (FILE2MOD[p] for p in TARGET if p in FILE2MOD):
         kept.update(nx.single_source_shortest_path_length(und,tgt,cutoff=args.hops).keys())
 else:
     kept=set(ALL_MODS)
 
-ordered=[FILE2MOD[p] for p in TARGET if FILE2MOD[p] in kept]+ \
-        sorted([m for m in kept if MOD2FILE[m] not in TARGET],
+# Fix: Convert TARGET paths to module names for comparison
+target_modules = {FILE2MOD[p] for p in TARGET if p in FILE2MOD}
+
+ordered=[FILE2MOD[p] for p in TARGET if p in FILE2MOD and FILE2MOD[p] in kept]+ \
+        sorted([m for m in kept if m not in target_modules],
                key=lambda m:-SCORE[m])
 
 # ─────────────────────────────── stub helpers
@@ -304,65 +314,98 @@ def strip_prefix(mods: list[str]) -> dict[str, str]:
     while all(len(p) > i for p in parts) and len({p[i] for p in parts}) == 1: i += 1
     return {m: '.'.join(p[i:]) or m for m, p in zip(mods, parts)}
 
-# ─────────────────────────────── emit
-cum_tok=0; nodes_meta=[]
+
+# ──────────────────────────── file_body helper ───────────────────────────
+def file_body(src_lines: list[str], hot: float) -> list[str]:
+    hot = max(0.0, min(1.0, hot))         # clamp
+    not_summary, full  = hot > 0.0, hot == 1.0
+    body: list[str] = []
+
+    try:
+        tree  = ast.parse("\n".join(src_lines))
+        mdoc  = ast.get_docstring(tree, clean=True)
+    except SyntaxError:
+        tree, mdoc = None, None
+
+    if mdoc:
+        # ▸ module‑level doc‑string
+        body.extend(['"""'] + [clean(l.replace("    ", "\t")) for l in mdoc.splitlines()] + ['"""'])
+
+    if not_summary:
+        # ▸ top‑level comments & variable declarations
+        covered: set[int] = set()
+        for d in defs(tree):
+            covered.update(
+                range(d.lineno - 1, getattr(d, "end_lineno", d.lineno))
+            )
+        for i, ln in enumerate(src_lines):
+            if i in covered or ln.strip() == "":
+                continue
+            if ln.lstrip().startswith(("import ", "from ")):
+                continue
+            if (
+                ln.lstrip().startswith("#") or
+                re.match(r"\w[\w\d]*\s*(?::[^=]+)?\s*(?:[+\-*/%&|^]?=)", ln)
+            ):
+                body.append(clean(lead_spaces_to_tabs(ln)))
+
+    for node in defs(tree):
+        # ▸ defs / classes
+        sig    = sig_lines(node, src_lines)
+        indent = re.match(r"[ \t]*", sig[0]).group(0).replace("    ", "\t")
+        body.extend(lead_spaces_to_tabs(l) for l in sig)
+
+        if full:
+            # ▸ whole body (collapse duplicate blanks)
+            blank = False
+            for i in range(node.lineno - 1 + len(sig),
+                           getattr(node, "end_lineno", node.lineno)):
+                ln = lead_spaces_to_tabs(src_lines[i])
+                if ln.strip() == "":
+                    if blank:
+                        continue
+                    blank = True
+                    body.append("")
+                else:
+                    blank = False
+                    body.append(clean(ln))
+
+        elif not_summary:
+            nested: set[int] = set()
+            for ch in ast.walk(node):
+                if ch is not node and isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    nested.update(range(ch.lineno - 1, getattr(ch, "end_lineno", ch.lineno)))
+
+            max_lc = max(1, int(SNIPPET_MAX_LINES * hot))
+            max_cc = max(1, int(SNIPPET_CHAR_LIMIT * hot))
+            lc = cc = 0
+            for i in range(node.lineno - 1 + len(sig),
+                           getattr(node, "end_lineno", node.lineno)):
+                if i in nested or src_lines[i].strip() == "":
+                    continue
+                ln = lead_spaces_to_tabs(src_lines[i])
+                lc += 1
+                cc += len(ln)
+                body.append(clean(ln))
+                if lc >= max_lc or cc >= max_cc:
+                    break
+        else:
+            doc = ast.get_docstring(node, clean=True)
+            if doc:
+                for l in ['"""'] + doc.replace('    ', '\t').splitlines() + ['"""']:
+                    body.append(indent + clean(l))
+    return body
+
+
+cum_tok=1; nodes_meta=[]
 labels = strip_prefix(ordered)
 for mod in ordered:
     p=MOD2FILE[mod]; src=p.read_text("utf-8","ignore").splitlines(False)
     hot = cum_tok < args.tokens or args.tokens==0
-    head=["### "+rel_to(p,ROOT),
+    head=["## "+rel_to(p,ROOT),
           f"> ΔPR {SCORE[mod]:.1f} │ PRg {PR_GLOBAL[mod]:.2f} │ toks {cum_tok}",
           "```python"]
-    body = []
-    # ── module-level docstring ──────────────────────────────
-    try:
-        tree  = ast.parse(p.read_text("utf-8", "ignore"))
-        mdoc  = ast.get_docstring(tree, clean=True)
-    except SyntaxError:
-        tree = None
-        mdoc = None
-
-    if mdoc:
-        body.extend(
-            ['"""']
-            + [clean(l.replace("    ", "\t")) for l in mdoc.splitlines()]
-            + ['"""']
-        )
-    for node in defs(tree):
-        sig    = sig_lines(node, src)
-        indent = re.match(r'[ \t]*', sig[0]).group(0).replace('    ', '\t')
-
-        body.extend(lead_spaces_to_tabs(l) for l in sig)
-        sig_end = node.lineno - 1 + len(sig) - 1
-        
-        if hot:
-            nested_ranges = set()
-            for ch in ast.walk(node):
-                if ch is not node and isinstance(
-                    ch, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                ):
-                    nested_ranges.update(
-                        range(ch.lineno - 1, getattr(ch, "end_lineno", ch.lineno))
-                    )
-
-            cc = lc = 0
-            for i in range(sig_end + 1, getattr(node, "end_lineno", node.lineno)):
-                if i in nested_ranges or src[i].strip() == "":
-                    continue
-                ln = lead_spaces_to_tabs(src[i])
-                lc += 1
-                cc += len(ln)
-                body.append(clean(ln))
-                if lc >= SNIPPET_MAX_LINES or cc >= SNIPPET_CHAR_LIMIT:
-                    break
-
-        else:
-            docstr = ast.get_docstring(node, clean=True)
-            if docstr:
-                doc = docstr.replace('    ', '\t')
-                for l in ['"""'] + doc.splitlines() + ['"""']:
-                    body.append(indent + clean(l))
-
+    body = file_body(src, hot)
     block="\n".join(head+body+["```"])
     if args.tokens and cum_tok+tok_est(block)>args.tokens: break
     cum_tok+=tok_est(block); print(block)

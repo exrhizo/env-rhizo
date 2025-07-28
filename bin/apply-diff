@@ -14,10 +14,9 @@ Assumptions
 * Hunks are given in file order.
 * The target file is text and ends with a trailing newline (added if missing).
 
-If a hunk’s context cannot be found exactly, the script aborts and returns 1.
+If a hunk's context cannot be found exactly, the script aborts and returns 1.
 """
 
-from __future__ import annotations
 import subprocess, sys
 from pathlib import Path
 from typing import List, Tuple
@@ -44,13 +43,13 @@ def parse_snippet(lines: List[str]) -> List[List[DiffLine]]:
     hunks: list[list[DiffLine]] = []
     cur: list[DiffLine] | None = None
     for raw in lines:
-        if raw.startswith('@@'):
+        if raw.startswith('@@') or raw == '':
             if cur:
                 hunks.append(cur)
             cur = []
             continue
         if cur is None:
-            continue                      # ignore preamble before first @@
+            continue
         tag, text = raw[0], raw[1:]
         if tag not in ' +-':
             raise ValueError(f"unexpected diff line: {raw!r}")
@@ -77,6 +76,7 @@ def patch_file(path: Path, snippet: str) -> None:
     hunks = parse_snippet(snippet.splitlines())
     cursor = 0
     for hunk in hunks:
+        print(f"applying hunk at {cursor}: {hunk[:2]}...")
         cursor = apply_hunk(buf, hunk, cursor)
     path.write_text('\n'.join(buf) + '\n')  # ensure trailing newline
 

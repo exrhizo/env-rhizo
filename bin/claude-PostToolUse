@@ -1,0 +1,342 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import traceback
+
+def _get_project_name(transcript_path: str) -> str:
+    parts = transcript_path.split("/")
+    return parts[parts.index("projects") + 1]
+
+def main() -> None:
+    try:
+        ctx = json.load(sys.stdin)
+    except json.JSONDecodeError as err:
+        print(f"Hook error: invalid JSON on stdin - {err}", file=sys.stderr)
+        sys.exit(1)
+
+    session_id: str = ctx.get("session_id", "")
+    session_prefix = session_id[0:4]
+    
+    transcript_path = os.path.expanduser(ctx.get("transcript_path", ""))
+    project = _get_project_name(transcript_path)
+    activity_dir = Path("~/.claude/activity").expanduser()
+    out_dir = activity_dir / project
+    out_dir.mkdir(parents=True, exist_ok=True)
+    date_prefix = datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    if not session_id or not transcript_path:
+        print("Hook error: missing session_id or transcript_path", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        lines = load_transcript(Path(transcript_path))
+        
+        out_jsonl = out_dir / f"{session_prefix}_{date_prefix}.jsonl"
+        out_jsonl.write_text(json.dumps(lines), encoding="utf-8")
+        
+
+        transcript_flow = phase_print(lines)
+        out_md = out_dir / f"{session_prefix}_{date_prefix}.md"
+        out_md.write_text(transcript_flow, encoding="utf-8")
+
+        # out_schema = out_dir / f"{session_prefix}_{date_prefix}.schema.json"
+        dump_schema(lines, out_dir, session_prefix, date_prefix)
+
+    except Exception as err:
+        stack_trace = traceback.format_exc()
+        print( f"Cannot write transcript, {err}\n{stack_trace}", file=sys.stderr)
+        sys.exit(1)
+
+
+
+
+
+
+
+# <LLM_MANAGED api="dump_schema">
+"""
+Generates `*.d.ts` alongside the existing `.jsonl` & `.md`.
+
+Algorithm
+─────────
+1.  Walk every JSON value, recording a set of **kind tags** for each field and
+    whether it appeared in *all* objects at that level.
+2.  Convert the aggregated structure to TypeScript:
+      • `string`, `number`, `boolean`, `null` primitives
+      • arrays → `T[]`
+      • objects → named `interface`s with `?` on optional keys
+      • unions → `A | B | null`
+3.  Writes  
+       `activity/<project>/<session>_<date>.schema.d.ts`
+"""
+
+import json
+from pathlib import Path
+from typing import Any, Mapping, MutableMapping, Set
+
+# ───────────── low‑level union collector ───────────── #
+
+_PRIM = {str: "string", int: "number", float: "number",
+         bool: "boolean", type(None): "null"}
+
+def _kind(v: Any) -> str:
+    if isinstance(v, list):    return "array"
+    if isinstance(v, Mapping): return "object"
+    return _PRIM.get(type(v), "any")
+
+def _atom(v: Any) -> Any:
+    tag = _kind(v)
+    node = {"_k": {tag}, "_n": 1}
+    if tag == "object":
+        node["p"] = {k: _atom(val) for k, val in v.items()}
+    elif tag == "array":
+        merged = None
+        for item in v:
+            merged = _merge(merged, _atom(item)) if merged else _atom(item)
+        node["it"] = merged
+    return node
+
+def _merge(a: Any | None, b: Any | None) -> Any:
+    if a is None: return b
+    if b is None: return a
+    merged = {"_k": a["_k"] | b["_k"], "_n": a["_n"] + b["_n"]}
+    if "p" in a or "p" in b:
+        props: MutableMapping[str, Any] = {}
+        for k in set(a.get("p", {})) | set(b.get("p", {})):
+            props[k] = _merge(a.get("p", {}).get(k), b.get("p", {}).get(k))
+        merged["p"] = props
+    if "it" in a or "it" in b:
+        merged["it"] = _merge(a.get("it"), b.get("it"))
+    return merged
+
+def _collect(samples: list[Any]) -> Any:
+    root = None
+    for s in samples:
+        root = _merge(root, _atom(s))
+    return root
+
+# ───────────── TypeScript emitter ───────────── #
+
+def _ts_type(node: Any, name_hint: str, out: list[str],
+             defined: Set[str]) -> str:
+    if node is None:
+        return "any"
+    kinds = node["_k"]
+
+    # primitive or simple union
+    if kinds <= {"string","number","boolean","null","any"}:
+        prims = [k for k in ["string","number","boolean","null","any"] if k in kinds]
+        return " | ".join(prims)
+
+    # array (possibly union with null, etc.)
+    if "array" in kinds and len(kinds - {"array","null"}) == 0:
+        el = _ts_type(node.get("it", {"_k":{"any"}, "_n":1}), name_hint+"Item", out, defined)
+        base = f"{el}[]"
+        return base if kinds == {"array"} else f"{base} | null"
+
+    # object (maybe union).  Always create named interface for reuse clarity.
+    obj_interface = f"I{ name_hint[0].upper() + name_hint[1:] }"
+    if obj_interface not in defined and "object" in kinds:
+        defined.add(obj_interface)
+        props      = node.get("p", {})
+        total_cnt  = node["_n"]
+        out.append(f"export interface {obj_interface} {{")
+        for k, sub in props.items():
+            optional = "" if sub["_n"] == total_cnt else "?"
+            ts       = _ts_type(sub, f'{name_hint}_{k}', out, defined)
+            escaped  = k if k.isidentifier() else f'"{k}"'
+            out.append(f"  {escaped}{optional}: {ts};")
+        out.append("}")
+        out.append("")
+
+    ts_obj = obj_interface if "object" in kinds else ""
+
+    # build union of object / other primitives
+    union_parts = [ts_obj] if ts_obj else []
+    union_parts += [k for k in ["string","number","boolean","null","any"]
+                    if k in kinds and k != "object"]
+    if "array" in kinds:
+        el = _ts_type(node.get("it", {"_k":{"any"}, "_n":1}), name_hint+"Item", out, defined)
+        union_parts.append(f"{el}[]")
+    return " | ".join(filter(None, union_parts))
+
+def json_to_ts(samples: list[Any], root_name: str = "Root") -> str:
+    schema = _collect(samples)
+    decls: list[str] = ["// Auto‑generated. Edit at your own risk.\n"]
+    defined: Set[str] = set()
+    root_ts = _ts_type(schema, root_name, decls, defined)
+    decls.append(f"export type {root_name} = {root_ts};\n")
+    return "\n".join(decls)
+
+# ───────────── public dump function ───────────── #
+
+def dump_schema(lines: list[dict[str, Any]], out_dir: Path,
+                session_prefix: str, date_prefix: str) -> None:
+    ts_code = json_to_ts(lines, "TranscriptEntry")
+    (out_dir / f"{session_prefix}_{date_prefix}.schema.d.ts").write_text(
+        ts_code, encoding="utf-8"
+    )
+# </LLM_MANAGED>
+
+
+
+
+
+# <LLM_MANAGED api="phase_print,load_transcript">
+"""
+Pretty‑printer – identical behaviour to v4:
+  • Markdown transcript with phases, TODO grouping, +Δs headers
+  • Tool blocks, 1 000‑char result clipping
+  • TodoWrite operations suppressed
+
+Only helper `load_transcript` + function `phase_print` live here so you can
+iterate on formatting without touching dump_schema.
+"""
+
+import json
+import sys
+from datetime import datetime, timezone
+from typing import Any, Mapping, List
+
+TRUNC = 1_000
+TOOL_WRITE_SET = {"TodoWrite"}
+
+# ───────────── helpers ───────────── #
+
+def load_transcript(path) -> List[dict[str, Any]]:
+    lines = []
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            lines.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            print(f"Warning: Skipping malformed JSON at line {i}: {e}", file=sys.stderr)
+            print(f"  Line content: {line[:100]}{'...' if len(line) > 100 else ''}", file=sys.stderr)
+            continue
+    return lines
+
+def _is_user(m): return m.get("message", {}).get("role") == "user"
+
+def _tool_name(m):
+    for b in m.get("message", {}).get("content", []):
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            return b.get("name")
+    return None
+
+def _tool_input(m):
+    for b in m.get("message", {}).get("content", []):
+        if isinstance(b, dict) and b.get("type") == "tool_use":
+            i = b.get("input", {})
+            return i.get("command") or i.get("file_path") or str(i)[:120]
+    return None
+
+def _tool_result(m):
+    outs=[]
+    for b in m.get("message", {}).get("content", []):
+        if isinstance(b, dict) and b.get("type")=="tool_result":
+            outs.append(str(b.get("content",""))[:TRUNC])
+    return f"\n```text\n{'\n'.join(outs)}\n```\n" if outs else None
+
+def _body(m):
+    c = m.get("message", {}).get("content","")
+    if isinstance(c, list):
+        parts=[]
+        for b in c:
+            if isinstance(b, dict) and b.get("type") in ("text","thinking"):
+                parts.append(b.get("text") or b.get("thinking",""))
+            elif isinstance(b,str):
+                parts.append(b)
+        return "\n".join(parts)
+    return str(c)
+
+def _todos(m):
+    for b in m.get("message", {}).get("content", []):
+        if isinstance(b, dict) and b.get("type")=="tool_use" and \
+           b.get("name") in TOOL_WRITE_SET:
+            return {t["id"]:t for t in b["input"].get("todos", [])}
+    return {}
+
+# ───────────── printer ───────────── #
+
+def phase_print(tr: List[dict[str,Any]]) -> str:
+    if not tr: return ""
+    
+    # Handle missing timestamp in first message
+    if "timestamp" not in tr[0]:
+        print("Warning: First message missing timestamp, using current time", file=sys.stderr)
+        start = datetime.now(timezone.utc)
+    else:
+        start = datetime.fromisoformat(tr[0]["timestamp"].replace("Z","+00:00"))
+    
+    proj  = tr[0].get("cwd","")
+    out   = [f"# {proj} · {start.isoformat()}"]
+
+    prompt=""; todos={}; phase=0
+    def open_phase(show_prompt, show_todos):
+        nonlocal phase, out
+        phase+=1
+        out.append(f"\n## Phase {phase}")
+        if show_prompt:
+            out += ["**Prompt:**","```md",prompt.rstrip(),"```"]
+        if show_todos:
+            out.append("\n_TODOs_")
+            ip=[t for t in todos.values() if t["status"]=="in_progress"]
+            pd=[t for t in todos.values() if t["status"]=="pending"]
+            if ip:
+                out.append("_In Progress_")
+                out += [f"- [>] **{t['id']}** {t['content']}" for t in ip]
+            if pd:
+                if ip: out.append("")
+                out.append("_Pending_")
+                out += [f"- [ ] **{t['id']}** {t['content']}" for t in pd]
+        out.append("")
+
+    for msg in tr:
+        # Handle missing timestamp in message
+        if "timestamp" not in msg:
+            print(f"Warning: Message missing timestamp: {msg.get('type', 'unknown')}", file=sys.stderr)
+            ts = datetime.now(timezone.utc)
+        else:
+            ts = datetime.fromisoformat(msg["timestamp"].replace("Z","+00:00"))
+        
+        elapsed = int((ts-start).total_seconds())
+        role = msg.get("message", {}).get("role", msg.get("type",""))
+        tool = _tool_name(msg)
+
+        if tool in TOOL_WRITE_SET:
+            new=_todos(msg)
+            if new!=todos:
+                todos=new; open_phase(False,True)
+            continue
+
+        if _is_user(msg):
+            p=_body(msg).strip()
+            if p and p!=prompt:
+                prompt=p
+                open_phase(True,False)
+        if phase==0: open_phase(False,False)
+
+        out.append(f"### +{elapsed}s · {role}")
+        if tool:
+            out += ["```yaml", f"tool: {tool}"]
+            cmd=_tool_input(msg);  out.append(f"cmd: {cmd}" if cmd else "cmd: ~")
+            out.append("```")
+        b=_body(msg);   out.append(b) if b else None
+        r=_tool_result(msg); out.append(r) if r else None
+
+    return "\n".join(out).rstrip()+"\n"
+# </LLM_MANAGED>
+
+
+
+
+
+
+if __name__ == "__main__":
+    main()
