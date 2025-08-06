@@ -8,8 +8,7 @@ export VISUAL=$EDITOR
 
 FILE=$ENVDIR/secrets.sh && test -f $FILE && source $FILE
 
-if [[$OS_TYPE == 'darwin'* ]]; then
-  source $ENVDIR/env-mac.sh
-else
-  source $ENVDIR/env-ubuntu.sh
-fi
+case $OS_TYPE in
+  darwin*) source $ENVDIR/env-mac.sh;;
+  *) source $ENVDIR/env-ubuntu.sh;;
+esac

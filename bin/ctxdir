@@ -1,0 +1,108 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+import argparse
+import mimetypes
+import sys
+from pathlib import Path
+
+# Add TypeScript MIME type mappings
+mimetypes.add_type("text/typescript", ".ts")
+mimetypes.add_type("text/typescript", ".tsx")
+
+# --- helpers ---------------------------------------------------------------
+
+_TEXT_MIME_PREFIXES = ("text/", "application/json", "application/xml", "application/javascript")
+
+_LANG_MAP = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".jsx": "jsx",
+    ".json": "json",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".md": "markdown",
+    ".html": "html",
+    ".css": "css",
+    ".sh": "bash",
+    ".zsh": "bash",
+    ".go": "go",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".java": "java",
+    ".sql": "sql",
+    ".txt": "",
+}
+
+
+def _is_text(path: Path) -> bool:
+    """Best-effort text/binary check."""
+    mime, _ = mimetypes.guess_type(path)
+    if mime:
+        return any(mime.startswith(p) for p in _TEXT_MIME_PREFIXES)
+    try:
+        path.open("rb").read(1024).decode("utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _language_tag(path: Path) -> str:
+    """Return the language tag for a code fence."""
+    return _LANG_MAP.get(path.suffix.lower(), path.suffix.lstrip("."))
+
+
+def _emit_heading(out, rel: Path) -> None:
+    print(f"### {rel.as_posix()}", file=out)
+
+
+def _emit_code(out, lang: str, text: str) -> None:
+    fence = "```"
+    print(f"{fence}{lang}", file=out)
+    print(text.rstrip(), file=out)
+    print(fence, file=out)
+
+
+def _emit_info(out, path: Path) -> None:
+    size = path.stat().st_size
+    print(f"`{path.name}` — binary/non‑text file, {size} bytes", file=out)
+
+
+def _walk(root: Path, current: Path, out) -> None:
+    for p in sorted(current.iterdir()):
+        if p.is_dir():
+            _walk(root, p, out)
+            continue
+
+        _emit_heading(out, p.relative_to(root))
+
+        if _is_text(p):
+            content = p.read_text(encoding="utf-8", errors="replace")
+            _emit_code(out, _language_tag(p), content)
+        else:
+            _emit_info(out, p)
+
+        print(file=out)  # blank line between entries
+
+
+# --- cli -------------------------------------------------------------------
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Recursively dump a directory to Markdown.")
+    ap.add_argument("directory", type=Path, help="Root directory to export")
+    ap.add_argument("-o", "--output", type=argparse.FileType("w"), default=sys.stdout, help="Markdown file (default: stdout)")
+    args = ap.parse_args()
+
+    root = args.directory.resolve()
+    if not root.is_dir():
+        ap.error(f"{root} is not a directory")
+
+    _walk(root, root, args.output)
+
+
+if __name__ == "__main__":
+    main()
