@@ -1,5 +1,3 @@
-export PATH=/usr/local/cuda-12.0/bin${PATH:+:${PATH}}
-export LD_LIBRARY_PATH=/usr/local/cuda-12.0/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
@@ -7,6 +5,7 @@ export NVM_DIR="$HOME/.nvm"
 
 function hgrep() { cat -n ~/.zsh_history | grep "$1"; }
 
+export PATH="$HOME/bin:$PATH"
 export PATH="$HOME/env-rhizo/bin:$PATH"
 
 

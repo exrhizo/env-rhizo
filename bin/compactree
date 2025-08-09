@@ -36,7 +36,8 @@ def emit(path: str) -> str:
     parts: List[str] = []
     parts += compress(files)
     for d in dirs:
-        parts.append(f"{d}({emit(os.path.join(path, d))})")
+        child = emit(os.path.join(path, d))
+        parts.append(f"{d}/({child})" if child else f"{d}/")
     return ",".join(parts)
 
 root = "."
