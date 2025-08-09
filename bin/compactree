@@ -1,0 +1,44 @@
+#!/Users/exrhizo/env-rhizo/.venv/bin/python
+import os, re
+from typing import List
+
+NUM = re.compile(r'^(.*?)(\d+)(\.[^.]*)?$')
+IGNORE = set(os.environ.get("COMPACTREE_IGNORE", ".git:node_modules:__pycache__").split(":"))
+
+def compress(names: List[str]) -> List[str]:
+    groups: dict[tuple[str,str], List[int]] = {}
+    out: List[str] = []
+    for n in names:
+        m = NUM.match(n)
+        if m:
+            pre, digits, suf = m.group(1), m.group(2), m.group(3) or ""
+            groups.setdefault((pre, suf), []).append(int(digits))
+        else:
+            out.append(n)
+    for (pre, suf), nums in groups.items():
+        nums.sort()
+        i = 0
+        while i < len(nums):
+            j = i
+            while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+                j += 1
+            out.append(f"{pre}[{nums[i]}-{nums[j]}]{suf}" if j > i else f"{pre}{nums[i]}{suf}")
+            i = j + 1
+    return sorted(out)
+
+def emit(path: str) -> str:
+    try:
+        entries = sorted(e for e in os.listdir(path) if e not in IGNORE)
+    except PermissionError:
+        return "⛔"
+    files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
+    dirs  = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+    parts: List[str] = []
+    parts += compress(files)
+    for d in dirs:
+        parts.append(f"{d}({emit(os.path.join(path, d))})")
+    return ",".join(parts)
+
+root = "."
+root_name = os.path.basename(os.path.abspath(root)) or "."
+print(f"{root_name}({emit(root)})")
