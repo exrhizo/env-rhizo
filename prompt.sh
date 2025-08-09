@@ -3,8 +3,12 @@ setopt prompt_subst            # let $(cmd) run inside PROMPT
 autoload -Uz colors && colors  # defines $fg[...] / %F{…} colours
 
 
-arch_indicator() {             # M1 vs Rosetta
-  [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == 1 ]] && echo x86 || echo M1
+arch_indicator() {             # M1 vs Rosetta, or 🐧 on Linux
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    echo 🐧
+  else
+    [[ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" == 1 ]] && echo x86 || echo M1
+  fi
 }
 
 git_prompt_info() {            # [branch] or [branch*] if dirty
