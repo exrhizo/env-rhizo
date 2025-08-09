@@ -1,45 +1,105 @@
 #!/Users/exrhizo/env-rhizo/.venv/bin/python
-import os, re
-from typing import List
+import os, re, sys, argparse
+from collections import Counter
+from typing import Dict, List, Set, Tuple
 
-NUM = re.compile(r'^(.*?)(\d+)(\.[^.]*)?$')
-IGNORE = set(os.environ.get("COMPACTREE_IGNORE", ".git:node_modules:__pycache__").split(":"))
+RESERVED: Set[str] = set("{}[]/,")
+NUM_TAIL = re.compile(r'^(.*?)(\d+)(\.[^.]+)?$')
+RANGE_TOKEN = re.compile(r'.*\[\d+-\d+].*')
+SET_TOKEN = re.compile(r'.*\{[^}]+}.*')
 
-def compress(names: List[str]) -> List[str]:
-    groups: dict[tuple[str,str], List[int]] = {}
-    out: List[str] = []
+def q(s: str) -> str:
+    if RANGE_TOKEN.match(s) or SET_TOKEN.match(s) or not any(c in RESERVED for c in s):
+        return s
+    return '"' + s.replace('"', '\\"') + '"'
+
+def compress_tail_range(names: List[str]) -> List[str]:
+    groups: Dict[Tuple[str, str, int], List[int]] = {}
+    rest: List[str] = []
     for n in names:
-        m = NUM.match(n)
+        m = NUM_TAIL.match(n)
         if m:
             pre, digits, suf = m.group(1), m.group(2), m.group(3) or ""
-            groups.setdefault((pre, suf), []).append(int(digits))
+            w = len(digits)
+            groups.setdefault((pre, suf, w), []).append(int(digits))
         else:
-            out.append(n)
-    for (pre, suf), nums in groups.items():
-        nums.sort()
+            rest.append(n)
+    out: List[str] = []
+    for (pre, suf, w), arr in groups.items():
+        arr.sort()
         i = 0
-        while i < len(nums):
+        while i < len(arr):
             j = i
-            while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            while j + 1 < len(arr) and arr[j + 1] == arr[j] + 1:
                 j += 1
-            out.append(f"{pre}[{nums[i]}-{nums[j]}]{suf}" if j > i else f"{pre}{nums[i]}{suf}")
+            a, b = f"{arr[i]:0{w}d}", f"{arr[j]:0{w}d}"
+            out.append(f"{pre}[{a}-{b}]{suf}" if j > i else f"{pre}{a}{suf}")
             i = j + 1
+    return sorted(rest + out)
+
+def set_compress(names: List[str], min_variants: int) -> List[str]:
+    groups: Dict[Tuple[str, str], Set[str]] = {}
+    singles: List[str] = []
+    for s in names:
+        if RANGE_TOKEN.match(s) or "/" in s:
+            singles.append(s); continue
+        p1 = s.rfind(".")
+        if p1 < 0: singles.append(s); continue
+        base, suf = s[:p1], s[p1:]
+        p0 = base.rfind(".")
+        if p0 < 0: singles.append(s); continue
+        pre, var = base[:p0+1], base[p0+1:]
+        if 1 <= len(var) <= 4 and var.isalnum():
+            groups.setdefault((pre, suf), set()).add(var)
+        else:
+            singles.append(s)
+    out: List[str] = singles[:]
+    for (pre, suf), vs in groups.items():
+        uniq = sorted(vs, key=lambda v: (len(v), v))
+        if len(uniq) >= min_variants:
+            out.append(f"{pre}" + "{" + ",".join(uniq) + "}" + f"{suf}")
+        else:
+            out.extend(f"{pre}{v}{suf}" for v in uniq)
     return sorted(out)
 
-def emit(path: str) -> str:
+def summarize_ext(files: List[str]) -> str:
+    exts = [os.path.splitext(f)[1][1:] or "noext" for f in files]
+    return ",".join(f"{e}×{n}" if n > 1 else e for e, n in Counter(exts).most_common())
+
+def emit(path: str, full: bool, max_list: int, ignore: Set[str], set_min: int) -> str:
     try:
-        entries = sorted(e for e in os.listdir(path) if e not in IGNORE)
-    except PermissionError:
+        entries = sorted(e for e in os.listdir(path) if e not in ignore)
+    except Exception:
         return "⛔"
     files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
     dirs  = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+
     parts: List[str] = []
-    parts += compress(files)
+    if not full and len(files) > max_list:
+        parts.append(summarize_ext(files))  # lossy
+    else:
+        names = set_compress(compress_tail_range(files), set_min)  # lossless
+        parts += [q(x) for x in names]
+
     for d in dirs:
-        child = emit(os.path.join(path, d))
-        parts.append(f"{d}/({child})" if child else f"{d}/")
+        c = emit(os.path.join(path, d), full, max_list, ignore, set_min)
+        parts.append(f"{q(d)}/{{{c}}}" if c else f"{q(d)}/")
     return ",".join(parts)
 
-root = "."
-root_name = os.path.basename(os.path.abspath(root)) or "."
-print(f"{root_name}({emit(root)})")
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root", nargs="?", default=".")
+    ap.add_argument("--full", action="store_true",
+                    help="lossless mode (no leaf summarization); keeps range + set compression")
+    ap.add_argument("--max-list", type=int, default=int(os.getenv("CT_MAX_LIST", "12")))
+    ap.add_argument("--ignore", default=os.getenv("CT_IGNORE", ".git:node_modules:__pycache__"))
+    ap.add_argument("--set-min", type=int, default=int(os.getenv("CT_SET_MIN", "3")))
+    args = ap.parse_args()
+
+    ignore = set(filter(None, args.ignore.split(":")))
+    root = os.path.abspath(args.root)
+    name = os.path.basename(root) or "."
+    print(f"{q(name)}/{{{emit(root, args.full, args.max_list, ignore, args.set_min)}}}")
+
+if __name__ == "__main__":
+    main()
