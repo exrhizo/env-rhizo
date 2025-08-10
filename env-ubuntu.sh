@@ -9,23 +9,11 @@ export PATH="$HOME/bin:$PATH"
 export PATH="$HOME/env-rhizo/bin:$PATH"
 
 
+# https://fsl.fmrib.ox.ac.uk/fsldownloads/fslconda/releases/fslinstaller.py
+export FSLDIR="$HOME/opt/fsl"
+. "$FSLDIR/etc/fslconf/fsl.sh"
+export PATH="$FSLDIR/bin:$PATH"
+export FSLOUTPUTTYPE=NIFTI_GZ
 
 
 
-
-# See: .zshrc
-# Seems like conda wants to manage a block of code like this:
-# >>> conda initialize >>>
-# !! Contents within this block are managed by 'conda init' !!
-# __conda_setup="$('/home/exrhizo/miniconda3/bin/conda' 'shell.zsh' 'hook' 2> /dev/null)"
-# if [ $? -eq 0 ]; then
-#     eval "$__conda_setup"
-# else
-#     if [ -f "/home/exrhizo/miniconda3/etc/profile.d/conda.sh" ]; then
-#         . "/home/exrhizo/miniconda3/etc/profile.d/conda.sh"
-#     else
-#         export PATH="/home/exrhizo/miniconda3/bin:$PATH"
-#     fi
-# fi
-# unset __conda_setup
-# <<< conda initialize <<<
