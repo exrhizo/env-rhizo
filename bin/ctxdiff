@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# ctxdiff — Markdown-friendly diffs.
+# Usage:
+#   ctxdiff                         # autodetect base (merge-base vs DEFAULT_BASES)
+#   ctxdiff -b <base>               # force base
+#   ctxdiff <commit>                # single-commit patch (that commit only)
+#   ctxdiff <from> <to>             # range diff (from..to), 'from' may be nth-parent (e.g. abc^2)
+set -euo pipefail
+export GIT_PAGER=cat
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Not a git repository" >&2; exit 1; }
+
+DEFAULT_BASES=(master main develop staging)
+
+# --- lockfile exclusions ---
+LOCK_PATTERNS=(
+  'package-lock.json' 'npm-shrinkwrap.json' 'pnpm-lock.yaml' 'yarn.lock' 'bun.lockb'
+  'uv.lock' 'poetry.lock' 'Pipfile.lock' 'pdm.lock'
+  'conda-lock.yml' 'conda-lock.yaml' 'conda-*.lock' 'pixi.lock'
+  'go.sum' 'go.work.sum'
+  'Cargo.lock'
+  'Gemfile.lock'
+  'composer.lock'
+  'mix.lock'
+  'pubspec.lock'
+  'Package.resolved'
+  'packages.lock.json'
+  'gradle.lockfile'
+  'helmfile.lock' 'Chart.lock'
+  'flake.lock'
+  'stack.yaml.lock' 'cabal.project.freeze'
+  'Podfile.lock' 'Pods/Manifest.lock'
+)
+EXCLUDES=()
+for p in "${LOCK_PATTERNS[@]}"; do
+  EXCLUDES+=(":(glob,icase,exclude)**/$p")
+done
+# --------------------------------
+
+resolve_override() {
+  local name="$1"
+  [ -z "$name" ] && return 1
+  if git rev-parse --verify -q "$name^{commit}" >/dev/null; then echo "$name"; return 0; fi
+  local r
+  for r in origin upstream; do
+    if git show-ref --verify -q "refs/remotes/$r/$name"; then echo "$r/$name"; return 0; fi
+  done
+  if git show-ref --verify -q "refs/heads/$name"; then echo "$name"; return 0; fi
+  return 1
+}
+
+gather_candidates() {
+  local b r
+  for b in "${DEFAULT_BASES[@]}"; do
+    for r in origin upstream; do
+      git show-ref --verify -q "refs/remotes/$r/$b" && echo "$r/$b"
+    done
+    git show-ref --verify -q "refs/heads/$b" && echo "$b"
+  done
+}
+
+pick_best_base() {
+  local best_b="" best_mb="" best_ts=0 mb ts ref
+  for ref in "$@"; do
+    if mb=$(git merge-base HEAD "$ref" 2>/dev/null); then
+      ts=$(git show -s --format=%ct "$mb" 2>/dev/null || echo 0)
+      if [ "$ts" -gt "$best_ts" ]; then best_ts="$ts"; best_mb="$mb"; best_b="$ref"; fi
+    fi
+  done
+  [ -n "$best_b" ] && printf "%s %s" "$best_b" "$best_mb"
+}
+
+# ---- args ----
+base_override=""
+positional=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -b|--base)
+      base_override="${2:-}"; shift 2 || true
+      ;;
+    -h|--help)
+      sed -n '2,20p' "$0"; exit 0
+      ;;
+    --)
+      shift
+      while [ $# -gt 0 ]; do positional+=("$1"); shift; done
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2; exit 2
+      ;;
+    *)
+      positional+=("$1"); shift
+      ;;
+  esac
+done
+
+if [ -n "$base_override" ] && [ "${#positional[@]}" -gt 0 ]; then
+  echo "-b/--base cannot be combined with explicit commits." >&2
+  exit 2
+fi
+
+mode="default"
+from="" to="" one=""
+
+verify_commit() { git rev-parse --verify -q "$1^{commit}" >/dev/null; }
+
+case "${#positional[@]}" in
+  0) mode="default" ;;
+  1)
+    one="${positional[0]}"; verify_commit "$one" || { echo "Commit '$one' not found." >&2; exit 1; }
+    mode="single"
+    ;;
+  2)
+    from="${positional[0]}"; to="${positional[1]}"
+    verify_commit "$from" || { echo "Commit '$from' not found." >&2; exit 1; }
+    verify_commit "$to"   || { echo "Commit '$to' not found." >&2; exit 1; }
+    mode="range"
+    ;;
+  *)
+    echo "Too many positional args. Use zero, one, or two commits." >&2; exit 2
+    ;;
+esac
+
+repo=$(basename "$(git rev-parse --show-toplevel)")
+branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+stamp=$(date -u +'%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || date)
+
+echo "# Changes"
+echo ""
+echo "- repo: $repo"
+echo "- branch: $branch"
+echo "- when: $stamp"
+
+if [ "$mode" = "single" ]; then
+  echo "- commit: $one"
+  subj=$(git show -s --format=%s "$one" 2>/dev/null || echo "")
+  [ -n "$subj" ] && echo "- subject: $subj"
+  echo ""
+  echo "## Files changed (this commit)"
+  echo ""
+  echo '```text'
+  git diff --name-status --no-ext-diff "$one^!" -- . "${EXCLUDES[@]}" || true
+  echo '```'
+  echo ""
+  echo "## Patch"
+  echo ""
+  echo '```diff'
+  git -c color.ui=never diff --no-ext-diff "$one^!" -- . "${EXCLUDES[@]}" || true
+  echo '```'
+  echo ""
+  exit 0
+fi
+
+if [ "$mode" = "range" ]; then
+  echo "- range: $from..$to"
+  echo ""
+  echo "## Files changed (range)"
+  echo ""
+  echo '```text'
+  git diff --name-status --no-ext-diff "$from..$to" -- . "${EXCLUDES[@]}" || true
+  echo '```'
+  echo ""
+  echo "## Combined Patch"
+  echo ""
+  echo '```diff'
+  git -c color.ui=never diff --no-ext-diff "$from..$to" -- . "${EXCLUDES[@]}" || true
+  echo '```'
+  echo ""
+  # Optional: list commits in range (most recent first)
+  echo "## Commits in range"
+  echo ""
+  echo '```text'
+  git log --oneline --no-decorate "$from..$to" || true
+  echo '```'
+  echo ""
+  exit 0
+fi
+
+# ---- default/base mode (legacy behavior) ----
+base=""
+mb=""
+
+if [ -n "$base_override" ]; then
+  if base=$(resolve_override "$base_override"); then
+    mb=$(git merge-base HEAD "$base" 2>/dev/null || true)
+  else
+    echo "Base '$base_override' not found (tried commit-ish, origin/*, upstream/*, local branch)." >&2
+    exit 1
+  fi
+else
+  best="$(pick_best_base $(gather_candidates) || true)"
+  if [ -n "$best" ]; then
+    base="${best%% *}"
+    mb="${best#* }"
+  else
+    base="HEAD~1"
+    mb=$(git merge-base HEAD "$base" 2>/dev/null || true)
+  fi
+fi
+
+echo "- base: $base"
+[ -n "$mb" ] && echo "- merge-base: $mb"
+echo ""
+
+echo "## Files changed (committed vs base)"
+echo ""
+echo '```text'
+if [ -n "$mb" ]; then
+  git diff --name-status --no-ext-diff "$mb"..HEAD -- . "${EXCLUDES[@]}" || true
+else
+  git diff --name-status --no-ext-diff "$base"..HEAD -- . "${EXCLUDES[@]}" || true
+fi
+echo '```'
+echo ""
+
+echo "## Combined (base → working tree)"
+echo ""
+echo '```diff'
+if [ -n "$mb" ]; then
+  git -c color.ui=never diff --no-ext-diff "$mb" -- . "${EXCLUDES[@]}" || true
+else
+  git -c color.ui=never diff --no-ext-diff "$base" -- . "${EXCLUDES[@]}" || true
+fi
+echo '```'
+echo ""
+
+echo "## Staged (HEAD → index)"
+echo ""
+echo '```diff'
+git -c color.ui=never diff --no-ext-diff --cached -- . "${EXCLUDES[@]}" || true
+echo '```'
+echo ""
+
+echo "## Unstaged (index → worktree)"
+echo ""
+echo '```diff'
+git -c color.ui=never diff --no-ext-diff -- . "${EXCLUDES[@]}" || true
+echo '```'
+echo ""
+
+untracked=$(git ls-files --others --exclude-standard -- . "${EXCLUDES[@]}")
+if [ -n "$untracked" ]; then
+  echo "## Untracked files"
+  echo ""
+  echo '```text'
+  printf "%s\n" "$untracked"
+  echo '```'
+  echo ""
+fi

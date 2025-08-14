@@ -74,6 +74,11 @@ brew install leiningen
 # zsh shell improvemtnes
 brew install fzf fd ripgrep
 
+brew install p7zip
+
+brew install pkg-config mariadb-connector-c
+
+
 #Apps
 # brew install --cask dropbox
 # brew install --cask firefox

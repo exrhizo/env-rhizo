@@ -66,3 +66,14 @@ export COMPOSE_MENU=false
 if [ -f '/Users/exrhizo/installs/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/exrhizo/installs/google-cloud-sdk/path.zsh.inc'; fi
 
 # The next line enables shell command completion for gcloud.
+
+
+# mysqlclient==2.2.7
+# help the build find the .pc files
+export PKG_CONFIG_PATH="$(brew --prefix)/lib/pkgconfig:$(brew --prefix mariadb-connector-c)/lib/pkgconfig"
+
+# if the builder still whines, set explicit flags (same libs, no guessing)
+export MYSQLCLIENT_CFLAGS="-I$(brew --prefix mariadb-connector-c)/include/mariadb"
+export MYSQLCLIENT_LDFLAGS="-L$(brew --prefix mariadb-connector-c)/lib -lmariadb"
+
+# export PATH="/usr/local/opt/mariadb-connector-c/bin:$PATH

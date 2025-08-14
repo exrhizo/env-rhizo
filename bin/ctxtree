@@ -1,7 +1,11 @@
 #!/Users/exrhizo/env-rhizo/.venv/bin/python
-import os, re, sys, argparse
+import os, re, sys, argparse, fnmatch
 from collections import Counter
 from typing import Dict, List, Set, Tuple
+from pathlib import PurePosixPath
+
+
+# ctxtree --ignore ".git:__pycache__:.venv*:.venv-lint:node_modules:data:.mypy_cache:.ruff_cache:.pytest_cache:.tox:.nox:.cache:build:dist:htmlcov:.coverage:coverage.xml:site-packages:*.dist-info:*.egg-info:.ipynb_checkpoints:.DS_Store:.idea:.vscode:logs:tmp:*.log:.ssh:*.pem:*.key:*.7z:*.zip:*.tar:*.tgz:*.gz:*.bz2:*.so:*.dylib"
 
 RESERVED: Set[str] = set("{}[]/,")
 NUM_TAIL = re.compile(r'^(.*?)(\d+)(\.[^.]+)?$')
@@ -66,13 +70,27 @@ def summarize_ext(files: List[str]) -> str:
     exts = [os.path.splitext(f)[1][1:] or "noext" for f in files]
     return ",".join(f"{e}×{n}" if n > 1 else e for e, n in Counter(exts).most_common())
 
-def emit(path: str, full: bool, max_list: int, ignore: Set[str], set_min: int) -> str:
+# --- ignore helpers (fnmatch on basename or relative path) ---
+def should_ignore(rel: str, name: str, pats: List[str]) -> bool:
+    posix_rel = PurePosixPath(rel).as_posix()
+    for pat in pats:
+        if not pat: continue
+        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(posix_rel, pat):
+            return True
+    return False
+
+def emit(root: str, rel: str, full: bool, max_list: int, ignore: List[str], set_min: int) -> str:
+    abs_dir = root if not rel else os.path.join(root, rel)
     try:
-        entries = sorted(e for e in os.listdir(path) if e not in ignore)
+        entries = sorted(
+            e for e in os.listdir(abs_dir)
+            if not should_ignore(f"{rel}/{e}" if rel else e, e, ignore)
+        )
     except Exception:
         return "⛔"
-    files = [e for e in entries if os.path.isfile(os.path.join(path, e))]
-    dirs  = [e for e in entries if os.path.isdir(os.path.join(path, e))]
+
+    files = [e for e in entries if os.path.isfile(os.path.join(abs_dir, e))]
+    dirs  = [e for e in entries if os.path.isdir(os.path.join(abs_dir, e))]
 
     parts: List[str] = []
     if not full and len(files) > max_list:
@@ -82,7 +100,7 @@ def emit(path: str, full: bool, max_list: int, ignore: Set[str], set_min: int) -
         parts += [q(x) for x in names]
 
     for d in dirs:
-        c = emit(os.path.join(path, d), full, max_list, ignore, set_min)
+        c = emit(root, f"{rel}/{d}" if rel else d, full, max_list, ignore, set_min)
         parts.append(f"{q(d)}/{{{c}}}" if c else f"{q(d)}/")
     return ",".join(parts)
 
@@ -92,14 +110,30 @@ def main() -> None:
     ap.add_argument("--full", action="store_true",
                     help="lossless mode (no leaf summarization); keeps range + set compression")
     ap.add_argument("--max-list", type=int, default=int(os.getenv("CT_MAX_LIST", "12")))
-    ap.add_argument("--ignore", default=os.getenv("CT_IGNORE", ".git:node_modules:__pycache__"))
     ap.add_argument("--set-min", type=int, default=int(os.getenv("CT_SET_MIN", "3")))
+    # Default ignore now includes .venv and node_modules; flag overrides defaults.
+    ap.add_argument(
+        "--ignore",
+        default=os.getenv("CT_IGNORE", ".git:__pycache__:.venv:node_modules"),
+        help="colon-separated fnmatch patterns applied to basenames and relative paths (overrides defaults)"
+    )
+    ap.add_argument(
+        "--blurb",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="print one-line header describing the encoding (default: on)"
+    )
     args = ap.parse_args()
 
-    ignore = set(filter(None, args.ignore.split(":")))
+    ignore_pats: List[str] = [p for p in args.ignore.split(":") if p]
     root = os.path.abspath(args.root)
     name = os.path.basename(root) or "."
-    print(f"{q(name)}/{{{emit(root, args.full, args.max_list, ignore, args.set_min)}}}")
+
+    if args.blurb:
+        mode = "lossless" if args.full else f"leaf-summarized>{args.max_list}"
+        fmt = "[a-b]=num ranges; {a,b}=variants; quotes=reserved; ⛔=unreadable"
+        print(f"# ctxtree: compact directory summary of '{name}' ({mode}; ignore={':'.join(ignore_pats)}; {fmt})")
+
+    print(f"{q(name)}/{{{emit(root, '', args.full, args.max_list, ignore_pats, args.set_min)}}}")
 
 if __name__ == "__main__":
     main()

@@ -38,6 +38,22 @@ _LANG_MAP = {
     ".txt": "",
 }
 
+# Pandas-readable file extensions
+_PANDAS_EXTENSIONS = {
+    ".csv": "csv",
+    ".xlsx": "excel",
+    ".xls": "excel",
+    ".parquet": "parquet",
+    ".feather": "feather",
+    ".h5": "hdf",
+    ".hdf5": "hdf",
+    ".json": "json",
+    ".xml": "xml",
+    ".html": "html",
+    ".sql": "sql",
+    ".db": "sqlite",
+    ".sqlite": "sqlite",
+}
 
 def _is_text(path: Path) -> bool:
     """Best-effort text/binary check."""
@@ -49,6 +65,80 @@ def _is_text(path: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _can_read_with_pandas(path: Path) -> bool:
+    """Check if file can be read with pandas."""
+    return path.suffix.lower() in _PANDAS_EXTENSIONS
+
+
+def _get_pandas_truncated_repr(path: Path, max_chars: int = 10000) -> str:
+    """Get pandas truncated representation using pandas' built-in display logic."""
+    try:
+        import pandas as pd
+        
+        suffix = path.suffix.lower()
+        
+        if suffix == ".csv":
+            df = pd.read_csv(path)
+        elif suffix in [".xlsx", ".xls"]:
+            df = pd.read_excel(path)
+        elif suffix == ".parquet":
+            df = pd.read_parquet(path)
+        elif suffix == ".feather":
+            df = pd.read_feather(path)
+        elif suffix in [".h5", ".hdf5"]:
+            df = pd.read_hdf(path)
+        elif suffix == ".json":
+            df = pd.read_json(path)
+        elif suffix == ".xml":
+            df = pd.read_xml(path)
+        elif suffix == ".html":
+            df = pd.read_html(path)
+        elif suffix in [".sql", ".db", ".sqlite"]:
+            # For SQL files, we'll just show the content as text
+            return None
+        else:
+            return None
+        
+        # Use pandas' built-in display options to control truncation
+        with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+            # First try with default pandas truncation
+            repr_str = str(df)
+            
+            if len(repr_str) <= max_chars:
+                return repr_str
+            
+            # If still too long, manually control the display
+            # Calculate how many rows we can show while staying under max_chars
+            # Estimate: assume each row is roughly 100 chars + column headers
+            estimated_chars_per_row = len(df.columns) * 15 + 50  # rough estimate
+            max_rows = max(1, (max_chars - 200) // estimated_chars_per_row)  # leave room for headers and truncation indicator
+            
+            if max_rows >= len(df):
+                # Can show all rows
+                return str(df)
+            elif max_rows >= 2:
+                # Show top and bottom rows with truncation
+                top_rows = max_rows // 2
+                bottom_rows = max_rows - top_rows
+                
+                top_df = df.head(top_rows)
+                bottom_df = df.tail(bottom_rows)
+                
+                result = str(top_df)
+                result += f"\n... ({len(df) - max_rows} rows omitted) ...\n"
+                result += str(bottom_df)
+                
+                return result
+            else:
+                # Can only show 1 row, just show basic info
+                return f"DataFrame with {len(df)} rows × {len(df.columns)} columns\nShape: {df.shape}\nColumns: {list(df.columns)}"
+            
+    except ImportError:
+        return "pandas not available"
+    except Exception as e:
+        return f"Error reading with pandas: {str(e)}"
 
 
 def _language_tag(path: Path) -> str:
@@ -64,7 +154,7 @@ def _emit_code(out, lang: str, text: str) -> None:
     fence = "```"
     print(f"{fence}{lang}", file=out)
     print(text.rstrip(), file=out)
-    print(fence, file=out)
+    print(f"{fence}", file=out)
 
 
 def _emit_info(out, path: Path) -> None:
@@ -72,17 +162,34 @@ def _emit_info(out, path: Path) -> None:
     print(f"`{path.name}` — binary/non‑text file, {size} bytes", file=out)
 
 
-def _walk(root: Path, current: Path, out) -> None:
+def _emit_pandas_repr(out, path: Path, max_chars: int = 10000) -> None:
+    """Emit pandas truncated representation for pandas-readable files."""
+    repr_str = _get_pandas_truncated_repr(path, max_chars)
+    if repr_str:
+        print(f"**Pandas DataFrame:**", file=out)
+        print(f"```", file=out)
+        print(repr_str, file=out)
+        print(f"```", file=out)
+    else:
+        # Fall back to regular text display
+        content = path.read_text(encoding="utf-8", errors="replace")
+        _emit_code(out, _language_tag(path), content)
+
+
+def _walk(root: Path, current: Path, out, max_chars: int = 10000) -> None:
     for p in sorted(current.iterdir()):
         if p.is_dir():
-            _walk(root, p, out)
+            _walk(root, p, out, max_chars)
             continue
 
         _emit_heading(out, p.relative_to(root))
 
         if _is_text(p):
-            content = p.read_text(encoding="utf-8", errors="replace")
-            _emit_code(out, _language_tag(p), content)
+            if _can_read_with_pandas(p):
+                _emit_pandas_repr(out, p, max_chars)
+            else:
+                content = p.read_text(encoding="utf-8", errors="replace")
+                _emit_code(out, _language_tag(p), content)
         else:
             _emit_info(out, p)
 
@@ -95,13 +202,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Recursively dump a directory to Markdown.")
     ap.add_argument("directory", type=Path, help="Root directory to export")
     ap.add_argument("-o", "--output", type=argparse.FileType("w"), default=sys.stdout, help="Markdown file (default: stdout)")
+    ap.add_argument("--max-chars", type=int, default=1000, help="Maximum characters for pandas representations (default: 10000)")
     args = ap.parse_args()
 
     root = args.directory.resolve()
     if not root.is_dir():
         ap.error(f"{root} is not a directory")
 
-    _walk(root, root, args.output)
+    _walk(root, root, args.output, args.max_chars)
 
 
 if __name__ == "__main__":
