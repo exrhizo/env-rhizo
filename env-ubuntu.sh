@@ -17,3 +17,15 @@ export FSLOUTPUTTYPE=NIFTI_GZ
 # export PATH="$HOME/opt/mrtrix3/bin:$PATH"
 export PATH="$HOME/pkg/MRtrix3Tissue/bin:$PATH"
 
+export EDITOR=vim
+
+HISTFILE=$HOME/.zsh_history
+HISTSIZE=200000
+SAVEHIST=200000
+
+setopt APPEND_HISTORY        # don’t clobber on exit
+setopt INC_APPEND_HISTORY    # write each command as you run it
+setopt SHARE_HISTORY         # merge across terminals
+setopt EXTENDED_HISTORY      # timestamps & durations
+setopt HIST_IGNORE_SPACE     # lines starting with space aren’t saved
+setopt HIST_REDUCE_BLANKS
